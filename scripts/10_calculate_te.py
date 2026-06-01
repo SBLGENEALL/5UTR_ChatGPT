@@ -21,6 +21,10 @@ def main():
     ribo = pd.read_csv(args.ribo)
     protein = pd.read_csv(args.protein)
 
+    rna["gene_id"] = rna["gene_id"].astype(str)
+    ribo["gene_id"] = ribo["gene_id"].astype(str)
+    protein["gene_id"] = protein["gene_id"].astype(str)
+
     required_rna = {"gene_id", "rna_abundance"}
     required_ribo = {"gene_id", "ribo_abundance"}
     required_protein = {"gene_id", "protein_abundance"}
