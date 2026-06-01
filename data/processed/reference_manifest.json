@@ -1,0 +1,9 @@
+{
+  "genome_fasta": "data\\reference\\GCF_003668045.1_CriGri-PICR_genomic.fna.gz",
+  "annotation_gff_or_gtf": "data\\reference\\GCF_003668045.1_CriGri-PICR_genomic.gff.gz",
+  "genome_size_bytes": 750696261,
+  "annotation_size_bytes": 15437646,
+  "fasta_record_count_checked": 1830,
+  "annotation_record_count_checked": 1277754,
+  "note": "Reference files validated. Use downstream steps to parse CDS and extract 5UTRs."
+}
