@@ -1,0 +1,23 @@
+project:
+  name: 5UTR_Engineering
+  version: v1.0.0
+
+paths:
+  reference: data/reference
+  raw: data/raw
+  processed: data/processed
+  candidates: data/candidates
+  results: results
+
+steps:
+  start: 0
+  end: 16
+
+model:
+  label: te_percentile_rank
+  candidate_count: 2000
+
+similarity:
+  method: jaccard
+  kmer: 8
+  threshold: 0.8
