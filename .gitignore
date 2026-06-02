@@ -58,3 +58,13 @@ Thumbs.db
 FINAL_NUMBERED_RELEASE_MANIFEST.json
 MANIFEST.txt
 data/
+
+# Keep directory skeletons but ignore generated/raw contents
+!00_raw_data/**/.gitkeep
+!02_utr_database/**/.gitkeep
+!03_tss_correction/**/.gitkeep
+!04_te_labeling/**/.gitkeep
+!05_feature_extraction/**/.gitkeep
+!06_modeling/**/.gitkeep
+!07_library_design/**/.gitkeep
+!08_reports/**/.gitkeep
