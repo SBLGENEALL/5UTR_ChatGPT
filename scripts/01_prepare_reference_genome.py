@@ -36,8 +36,8 @@ def count_annotation_records(annotation_path: Path, max_records: int | None = No
 def main():
     parser = argparse.ArgumentParser(description="Validate/register CHO CriGri-PICR reference genome inputs.")
     parser.add_argument("--config", default="config/config.yaml")
-    parser.add_argument("--genome", default="data/reference/GCF_003668045.1_CriGri-PICR_genomic.fna.gz")
-    parser.add_argument("--annotation", default="data/reference/GCF_003668045.1_CriGri-PICR_genomic.gff.gz")
+    parser.add_argument("--genome", default="data/raw/01_ncbi_genome_annotation/GCF_003668045.1_CriGri-PICR_genomic.fna.gz")
+    parser.add_argument("--annotation", default="data/raw/01_ncbi_genome_annotation/GCF_003668045.1_CriGri-PICR_genomic.gff.gz")
     parser.add_argument("--output", default="data/processed/reference_manifest.json")
     args = parser.parse_args()
 
