@@ -121,7 +121,7 @@ def build_cds_table(transcripts: dict, cds_by_transcript: dict) -> pd.DataFrame:
 def main():
     parser = argparse.ArgumentParser(description="Parse NCBI CriGri-PICR GFF3 and build CDS/start-codon annotation table.")
     parser.add_argument("--config", default="config/config.yaml")
-    parser.add_argument("--annotation", default="data/reference/GCF_003668045.1_CriGri-PICR_genomic.gff.gz")
+    parser.add_argument("--annotation", default="data/raw/01_ncbi_genome_annotation/GCF_003668045.1_CriGri-PICR_genomic.gff.gz")
     parser.add_argument("--output", default="data/processed/cds_annotation.csv")
     args = parser.parse_args()
 
