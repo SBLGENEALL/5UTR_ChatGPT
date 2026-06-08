@@ -1,6 +1,6 @@
 # 5UTR Engineering MASTER
 
-Last Updated: 2026-06-04
+Last Updated: 2026-06-08
 Source of Truth: GitHub `main` branch + this `MASTER.md`
 Status: ACTIVE
 
@@ -18,8 +18,10 @@ The current official release is designed to start from raw data only and produce
 
 Repository: `SBLGENEALL/5UTR_Engineering`
 Branch: `main`
-Release concept: Final numbered release
+Current official baseline: `v1.2`
 Baseline package/reference: `CHO5UTR_FINAL_RELEASE_GitHub_ready.zip`
+
+The validated PR3 / PR3-2 work should be folded into the `v1.2` baseline when accepted. Do not introduce `improved-v1.3` as a separate active baseline unless a future release is intentionally created.
 
 Official run command:
 
@@ -111,7 +113,63 @@ This rule should be preserved or reconciled with the current step-03 script nami
 
 ---
 
-## 8. Project Management Rules
+## 8. Validation Record: PR3 / PR3-2
+
+PR3 introduced the uAUG0 production-selection validation gate. PR3-2 is the workstation-validated PR3 follow-up and should be treated as a `v1.2` maintenance/improvement candidate, not as a new `v1.3` baseline.
+
+Validated PR3-2 metrics:
+
+```text
+selected_n=2000
+uaug_positive_n=0
+n_unique_seq_clusters=1937
+max_per_seq_cluster=2
+max_per_gene=3
+mean_heavy_ensemble_score=0.5811515
+mean_robust_public_te_rank=0.642380
+```
+
+Decision:
+
+```text
+Use PR3-2 validation as the accepted PR3 evidence.
+Fold accepted PR3/PR3-2 changes into v1.2 when ready.
+Do not use improved-v1.3 as a current baseline name.
+PR4 was not executed and should not be recorded as an active or abandoned development branch.
+The next 1.2 improvement should be named as a v1.2 follow-up branch, not as standalone PR5.
+```
+
+---
+
+## 9. Branch Naming / Version Policy
+
+Use this convention going forward:
+
+```text
+main                 = official source of truth
+v1.2                 = current official baseline/release concept
+v1.2-pr3             = PR3 development branch/work item
+v1.2-pr3-2           = PR3 follow-up validation branch/work item
+v1.2-pr-next-topic   = next v1.2 improvement branch/work item
+```
+
+Avoid these names unless intentionally releasing a new major candidate:
+
+```text
+improved-v1.3
+pr5-diversity-qc
+PR4 performance optimization
+```
+
+Current cleanup note:
+
+```text
+The remote branch pr5-diversity-qc was created from the recent documentation-only commit and is not the official next baseline. It should be ignored or replaced by a properly named v1.2 follow-up branch after the next work item is defined.
+```
+
+---
+
+## 10. Project Management Rules
 
 - GitHub `main` is the official project state.
 - `MASTER.md` is the lightweight project consensus document.
@@ -119,10 +177,11 @@ This rule should be preserved or reconciled with the current step-03 script nami
 - When a workspace becomes slow, create the next workspace: `5UTR_WORKSPACE_02`, `5UTR_WORKSPACE_03`, etc.
 - At the end of a workspace, update only validated decisions into `MASTER.md`, `CHANGELOG.md`, and `NEXT_ACTIONS.md`.
 - Failed attempts and long discussions should not be copied into `MASTER.md` unless they affect current project decisions.
+- Validated PR branches should be folded back into the current numbered baseline before starting the next numbered PR.
 
 ---
 
-## 9. New Chat Start Template
+## 11. New Chat Start Template
 
 Use this from PC or mobile:
 
@@ -135,8 +194,11 @@ GitHub main의 MASTER.md 기준으로 진행해줘.
 
 ---
 
-## 10. Current Next Focus
+## 12. Current Next Focus
 
+- Keep `v1.2` as the current baseline name.
+- Reconcile accepted PR3/PR3-2 changes into the `v1.2` baseline.
+- Rename the next development item as a `v1.2` follow-up branch after the scope is defined.
 - Confirm step-03 auto sample assignment against the current repository script name and implementation.
 - Keep the final numbered pipeline stable and team-shareable.
 - Use `CHANGELOG.md` for dated changes and `NEXT_ACTIONS.md` for the next practical tasks.
