@@ -4,6 +4,46 @@ This file records only project-level decisions and validated changes. Long explo
 
 ---
 
+## 2026-06-08
+
+### Corrected
+
+- Clarified that the current official baseline remains `v1.2`.
+- Clarified that PR3 / PR3-2 validation should be folded into the `v1.2` baseline when accepted.
+- Removed `improved-v1.3 candidate` as a current baseline concept.
+- Clarified that PR4 was not executed and should not be treated as an active or abandoned development branch.
+- Clarified that the next improvement should be named as a `v1.2` follow-up branch/work item, not as standalone `PR5`.
+
+### PR3 / PR3-2 Validation Record
+
+PR3 introduced the uAUG0 production-selection validation gate. PR3-2 is the workstation-validated PR3 follow-up.
+
+Validation results:
+
+```text
+selected_n=2000
+uaug_positive_n=0
+n_unique_seq_clusters=1937
+max_per_seq_cluster=2
+max_per_gene=3
+mean_heavy_ensemble_score=0.5811515
+mean_robust_public_te_rank=0.642380
+```
+
+Decision:
+
+```text
+Treat PR3-2 as accepted PR3 evidence for v1.2 maintenance.
+Do not call the current state improved-v1.3.
+Do not advance to PR4/PR5 naming until the accepted PR3/PR3-2 state is folded into v1.2.
+```
+
+### Branch Cleanup Note
+
+The remote branch `pr5-diversity-qc` was created from a documentation-only commit and is not the official next baseline. It should be ignored or replaced by a properly named `v1.2` follow-up branch after the next work item is defined.
+
+---
+
 ## 2026-06-04
 
 ### Added
