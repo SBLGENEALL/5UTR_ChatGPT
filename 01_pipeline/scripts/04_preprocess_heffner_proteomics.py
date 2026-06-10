@@ -19,6 +19,8 @@ GENEINFO = MAPDIR / "gene_info.gz"
 
 OUT_CSV = PROT_DIR / "Heffner_2020_CHO_hamster_proteomics_ncbi_mapped_for_5utr.csv"
 OUT_REPORT = PROT_DIR / "Heffner_2020_CHO_hamster_proteomics_ncbi_mapped_report.txt"
+OUT_ACCESSION_AUDIT = PROT_DIR / "Heffner_accession_to_gene_audit.csv"
+OUT_UNMAPPED_ACCESSIONS = PROT_DIR / "Heffner_unmapped_accessions.csv"
 CFG_PATH = BASE / "01_pipeline/config/proteomics_config.json"
 
 TAX_ID = 10029  # Cricetulus griseus
@@ -162,6 +164,22 @@ def find_col(df, candidates, required=False):
     return None
 
 
+def infer_tmt_source(raw, source_col):
+    if source_col:
+        source = raw[source_col].fillna("").astype(str).str.strip()
+    else:
+        source = pd.Series("unspecified", index=raw.index, dtype=object)
+    source_upper = source.str.upper()
+    return np.select(
+        [
+            source_upper.str.contains(r"\bTMT[\s_-]*1\b", regex=True),
+            source_upper.str.contains(r"\bTMT[\s_-]*2\b", regex=True),
+        ],
+        ["TMT1", "TMT2"],
+        default=source.replace("", "unspecified"),
+    )
+
+
 def read_gene_info():
     if not GENEINFO.exists():
         print("[WARN] gene_info.gz missing; will rely on GeneSymbol if present.")
@@ -241,6 +259,11 @@ def main():
     pep_col = find_col(raw, ["Peptides", "Peptide", "PeptideCount", "Peptide Count", "TotalPeptides"], required=False)
     uniq_col = find_col(raw, ["UniquePeptides", "Unique Peptides", "UniquePeptide", "Unique peptide count"], required=False)
     desc_col = find_col(raw, ["Description", "ProteinDescription", "Protein Description"], required=False)
+    source_col = find_col(
+        raw,
+        ["SourceSheet", "Source Sheet", "TMT", "TMTSet", "TMT Set", "Batch", "Experiment", "Run"],
+        required=False,
+    )
 
     prot = pd.DataFrame()
     prot["Accession"] = raw[acc_col].map(clean_accession)
@@ -250,7 +273,8 @@ def main():
     prot["Σ# Peptides"] = pd.to_numeric(raw[pep_col], errors="coerce") if pep_col else prot["Σ# PSMs"]
     prot["Σ# Unique Peptides"] = pd.to_numeric(raw[uniq_col], errors="coerce") if uniq_col else prot["Σ# Peptides"]
     prot["ΣCoverage"] = 0
-    prot["source_sheet"] = "minimal_manual"
+    prot["source_sheet"] = infer_tmt_source(raw, source_col)
+    prot["raw_row_index"] = raw.index + 2
 
     prot = prot[prot["Accession"].notna() | prot["GeneSymbol"].notna()].copy()
     prot = prot[prot["Σ# PSMs"].notna()].copy()
@@ -303,6 +327,16 @@ def main():
     # fallback to manual GeneSymbol if gene mapping failed
     mapped["gene_symbol_key"] = mapped["gene_symbol_key"].fillna(mapped["gene_symbol_key_gene2acc"]).fillna(mapped["GeneSymbol"])
     mapped["gene_symbol"] = mapped["Symbol"].fillna(mapped["gene_symbol_key"])
+    mapped["accession_to_gene_success"] = mapped["gene_symbol_key"].notna() | mapped["gene_id_key"].notna()
+    mapped["accession_mapping_mode"] = np.select(
+        [
+            mapped["protein_gi_key"].notna() & mapped["gene_id_key"].notna(),
+            mapped["protein_accession_key"].notna() & mapped["gene_id_key"].notna(),
+            mapped["GeneSymbol"].notna(),
+        ],
+        ["protein_gi_or_accession", "protein_accession", "provided_gene_symbol"],
+        default="unmapped",
+    )
 
     # If no gene_id but symbol exists, create pseudo gene_id. Downstream can still map by gene_symbol.
     no_id_has_symbol = mapped["gene_id_key"].isna() & mapped["gene_symbol_key"].notna()
@@ -350,6 +384,25 @@ def main():
     OUT_CSV.parent.mkdir(parents=True, exist_ok=True)
     collapsed.to_csv(OUT_CSV, index=False, encoding="utf-8")
 
+    accession_audit_cols = [
+        "raw_row_index", "source_sheet", "Accession", "GeneSymbol", "Description",
+        "protein_gi_key", "protein_accession_key", "protein_accession_noversion",
+        "gene_id_key", "gene_symbol_key", "gene_symbol",
+        "accession_to_gene_success", "accession_mapping_mode",
+    ]
+    mapped[accession_audit_cols].to_csv(OUT_ACCESSION_AUDIT, index=False, encoding="utf-8")
+    unmapped_accessions = mapped[~mapped["accession_to_gene_success"]][
+        ["raw_row_index", "source_sheet", "Accession", "GeneSymbol", "Description"]
+    ].drop_duplicates()
+    unmapped_accessions.to_csv(OUT_UNMAPPED_ACCESSIONS, index=False, encoding="utf-8")
+
+    raw_accessions = prot["Accession"].dropna()
+    source_upper = prot["source_sheet"].fillna("").astype(str).str.upper()
+    raw_tmt1_n = int((source_upper == "TMT1").sum())
+    raw_tmt2_n = int((source_upper == "TMT2").sum())
+    mapped_accession_n = int(mapped["accession_to_gene_success"].sum())
+    accession_success_rate = mapped_accession_n / len(mapped) if len(mapped) else np.nan
+
     # update config
     if CFG_PATH.exists():
         try:
@@ -392,12 +445,21 @@ def main():
         "=" * 90,
         f"input_file: {PROT_MINIMAL_TSV if PROT_MINIMAL_TSV.exists() else PROT_MINIMAL_CSV}",
         f"raw_rows: {len(raw)}",
+        f"raw_TMT1_accession_count: {raw_tmt1_n}",
+        f"raw_TMT2_accession_count: {raw_tmt2_n}",
+        f"combined_raw_accession_count: {len(raw_accessions)}",
+        f"unique_accession_count: {raw_accessions.nunique()}",
         f"usable_protein_rows: {len(prot)}",
+        f"accession_to_gene_mapped_rows: {mapped_accession_n}",
+        f"accession_to_gene_conversion_success_rate: {accession_success_rate:.6f}",
+        f"unmapped_accession_count: {len(unmapped_accessions)}",
         f"rows_with_gene_symbol_or_mapping: {len(out)}",
         f"unique_gene_ids_or_pseudo_ids: {collapsed['gene_id_key'].nunique()}",
         f"unique_gene_symbols: {collapsed['gene_symbol_key'].nunique()}",
-        f"selected columns: acc={acc_col}, gene={gene_col}, psm={psm_col}, peptides={pep_col}, unique={uniq_col}, desc={desc_col}",
+        f"selected columns: acc={acc_col}, gene={gene_col}, psm={psm_col}, peptides={pep_col}, unique={uniq_col}, desc={desc_col}, source={source_col}",
         f"output_csv: {OUT_CSV}",
+        f"accession_audit_csv: {OUT_ACCESSION_AUDIT}",
+        f"unmapped_accession_csv: {OUT_UNMAPPED_ACCESSIONS}",
         f"updated_config: {CFG_PATH}",
         "",
         "[Top 30 by abundance_proxy]",

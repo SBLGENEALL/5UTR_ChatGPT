@@ -41,3 +41,5 @@ for step in steps:
 print("\nDONE: CHO5UTR final numbered pipeline completed.")
 print("Final CSV : 07_library_design/tables/selected_2000_50_100bp_cluster_diverse_evidence_balanced_library.csv")
 print("Final FASTA: 07_library_design/fasta/selected_2000_50_100bp_cluster_diverse_evidence_balanced_library.fasta")
+print("Run v1.4 QC audit separately after installing minimap2 or BLAST+:")
+print("python 01_pipeline/scripts/run_04_v14_qc_audit.py --baseline-v1.3 <v1.3 selected CSV>")

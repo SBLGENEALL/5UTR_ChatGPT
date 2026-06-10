@@ -26,6 +26,7 @@ OUT_UAUG0_DRY_SUMMARY = BASE / "07_library_design/tables/uaug0_hard_filter_dry_r
 OUT_UAUG0_SHORTFALL = BASE / "07_library_design/tables/uaug0_hard_filter_quota_shortfall.csv"
 OUT_UAUG0_REPLACEMENTS = BASE / "07_library_design/tables/uaug0_replacement_candidates.csv"
 OUT_UAUG0_VALIDATION = BASE / "07_library_design/qc/uaug0_production_validation_report.txt"
+OUT_REFILL_AUDIT = BASE / "07_library_design/tables/evidence_refill_audit.csv"
 for p in [OUT_CSV.parent, OUT_FASTA.parent, OUT_QC.parent, OUT_DIVERSITY.parent, OUT_UAUG_SUMMARY_TXT.parent, OUT_UAUG_SUMMARY_CSV.parent]:
     p.mkdir(parents=True, exist_ok=True)
 
@@ -323,18 +324,17 @@ def dry_run_select_uaug0(base_cand, args, quotas, production_lib):
                 cid = str(row.get("seq_cluster_id", row[SEQ]))
                 if cluster_counts[cid] < args.allow_cluster_fill:
                     row = row.copy()
-                    row["library_group"] = "J_fill_best_remaining_allow_cluster2"
+                    row["library_group"] = "A_publicTE_high_confidence"
                     row["selection_source"] = source
+                    row["selection_phase"] = "evidence_refill"
                     rows.append(row)
                     used_seq.add(row[SEQ])
                     cluster_counts[cid] += 1
             if rows:
                 lib = pd.concat([lib, pd.DataFrame(rows)], ignore_index=True, sort=False)
-                taken_by_group["J_fill_best_remaining_allow_cluster2"] += len(rows)
+                taken_by_group["A_publicTE_high_confidence"] += len(rows)
 
         fill_from(evidence0, "uaug0_fill_evidence_cand")
-        if len(lib) < args.n:
-            fill_from(base0, "uaug0_fill_base_cand_clean_sequence")
 
     lib = lib.drop_duplicates(subset=[SEQ], keep="first").head(args.n).copy()
     lib["library_index"] = np.arange(1, len(lib) + 1)
@@ -474,6 +474,11 @@ def main():
     ap.add_argument("--max-per-cluster", type=int, default=1)
     ap.add_argument("--allow-cluster-fill", type=int, default=2, help="allow this per cluster during final fill if needed")
     ap.add_argument("--max-per-gene", type=int, default=4, help="maximum selected candidates per gene_name/gene_id when available")
+    ap.add_argument(
+        "--allow-evidence-shortfall",
+        action="store_true",
+        help="write a library smaller than --n instead of failing when evidence-only refill is insufficient",
+    )
     args = ap.parse_args()
 
     path = choose_input(args.input)
@@ -646,20 +651,27 @@ def main():
         lib["is_reference_control"] = False
         print("  reference controls: none found")
 
-    # Final fill if below requested n.
+    # Evidence-only refill if below requested n. Never create a generic J_fill group.
+    refill_audit_rows = []
     if len(lib) < args.n:
         used_seq = set(lib[SEQ])
         cluster_counts = defaultdict(int, lib[~lib["is_reference_control"].fillna(False)].groupby("seq_cluster_id").size().to_dict() if "seq_cluster_id" in lib.columns else {})
         gene_col_for_cap = choose_gene_column(lib)
         gene_counts = defaultdict(int, nonempty_series(lib, gene_col_for_cap).value_counts().to_dict() if gene_col_for_cap else {})
         fill = []
-        fill_source_counts = defaultdict(int)
+        fill_group_counts = defaultdict(int)
 
-        def fill_from(pool, source):
+        def fill_from(pool, group, source, sort_cols, limit=None):
             nonlocal fill
-            p = pool[~pool[SEQ].isin(used_seq)].sort_values(["cluster_diverse_evidence_score", "robust_public_te_rank"], ascending=False)
+            available_sort_cols = [c for c in sort_cols if c in pool.columns]
+            if not available_sort_cols:
+                available_sort_cols = ["cluster_diverse_evidence_score"]
+            p = pool[~pool[SEQ].isin(used_seq)].sort_values(available_sort_cols, ascending=False)
+            selected_this_call = 0
             for _, row in p.iterrows():
                 if len(lib) + len(fill) >= args.n:
+                    break
+                if limit is not None and selected_this_call >= limit:
                     break
                 cid = str(row.get("seq_cluster_id", row[SEQ]))
                 gkey = gene_key(row)
@@ -667,22 +679,100 @@ def main():
                 if cluster_counts[cid] < args.allow_cluster_fill and gene_ok:
                     row = row.copy()
                     row["selection_source"] = source
+                    row["selection_phase"] = "evidence_refill"
+                    row["library_group"] = group
                     fill.append(row)
                     used_seq.add(row[SEQ])
                     cluster_counts[cid] += 1
                     if gkey is not None:
                         gene_counts[gkey] += 1
-                    fill_source_counts[source] += 1
+                    fill_group_counts[group] += 1
+                    selected_this_call += 1
+            return selected_this_call
 
-        fill_from(evidence_cand, "fill_evidence_cand")
+        multiomics_mask = (
+            pd.to_numeric(evidence_cand["multi_omics_utr_rank"], errors="coerce").notna()
+            if "multi_omics_utr_rank" in evidence_cand.columns
+            else pd.Series(False, index=evidence_cand.index)
+        )
+        refill_specs = [
+            (
+                "A_publicTE_high_confidence",
+                evidence_cand[pd.to_numeric(evidence_cand["robust_public_te_rank"], errors="coerce").notna()],
+                "refill_public_te_evidence",
+                ["robust_public_te_rank", "cluster_diverse_evidence_score"],
+            ),
+            (
+                "B_TE_model_classifier_supported",
+                evidence_cand[pd.to_numeric(evidence_cand["model_support_score"], errors="coerce").notna()],
+                "refill_classifier_supported",
+                ["model_support_score", "robust_public_te_rank"],
+            ),
+            (
+                "C_protein_abundance_supported",
+                evidence_cand[optional_bool_gate(evidence_cand, "has_proteomics_label", default=False)],
+                "refill_proteomics_supported",
+                ["protein_abundance_rank", "protein_residual_rank", "cluster_diverse_evidence_score"],
+            ),
+            (
+                "E_multiomics_consensus_high",
+                evidence_cand[multiomics_mask],
+                "refill_multiomics_supported",
+                ["multi_omics_utr_rank", "cluster_diverse_evidence_score"],
+            ),
+        ]
+        refill_weights = {
+            "A_publicTE_high_confidence": 0.35,
+            "B_TE_model_classifier_supported": 0.25,
+            "C_protein_abundance_supported": 0.20,
+            "E_multiomics_consensus_high": 0.20,
+        }
+        initial_shortfall = args.n - len(lib)
+        for group, pool, source, sort_cols in refill_specs:
+            target = max(1, int(round(initial_shortfall * refill_weights[group])))
+            selected_n = fill_from(pool, group, source, sort_cols, limit=target)
+            refill_audit_rows.append({
+                "library_group": group,
+                "selection_source": source,
+                "refill_pass": "weighted",
+                "target_refill_n": target,
+                "available_pool_n": len(pool),
+                "selected_refill_n": selected_n,
+            })
         if len(lib) + len(fill) < args.n:
-            fill_from(base_cand, "fill_base_cand_clean_sequence")
+            for group, pool, source, sort_cols in refill_specs:
+                selected_n = fill_from(pool, group, source, sort_cols)
+                refill_audit_rows.append({
+                    "library_group": group,
+                    "selection_source": source,
+                    "refill_pass": "catch_up",
+                    "target_refill_n": args.n - len(lib) - len(fill) + selected_n,
+                    "available_pool_n": len(pool),
+                    "selected_refill_n": selected_n,
+                })
+                if len(lib) + len(fill) >= args.n:
+                    break
+
         if fill:
             f = pd.DataFrame(fill)
-            f["library_group"] = "J_fill_best_remaining_allow_cluster2"
             f["is_reference_control"] = False
             lib = pd.concat([lib, f], ignore_index=True, sort=False)
-            print(f"  fill: {len(f)}; sources={dict(fill_source_counts)}")
+            print(f"  evidence refill: {len(f)}; groups={dict(fill_group_counts)}")
+
+    pd.DataFrame(
+        refill_audit_rows,
+        columns=[
+            "library_group", "selection_source", "refill_pass", "target_refill_n",
+            "available_pool_n", "selected_refill_n",
+        ],
+    ).to_csv(OUT_REFILL_AUDIT, index=False)
+
+    if len(lib) < args.n and not args.allow_evidence_shortfall:
+        raise SystemExit(
+            f"Evidence-only refill shortfall: selected {len(lib)} of {args.n}. "
+            "J_fill/base-candidate fallback is disabled. Review evidence quotas or use "
+            "--allow-evidence-shortfall for audit-only output."
+        )
 
     lib = lib.drop_duplicates(subset=[SEQ], keep="first").head(args.n).copy()
     lib["library_index"] = np.arange(1, len(lib) + 1)
@@ -691,6 +781,7 @@ def main():
         "library_index", "library_group", "is_reference_control", "utr_id", "gene_id", "gene_name", SEQ,
         "length", "gc_content", "uaug_count", "seq_cluster_id", "seq_cluster_size", "forbidden_sites",
         "selection_source", "is_expressed_public", "expression_qc_reason",
+        "selection_phase",
         "robust_public_te_rank", "day_consensus_TE_rank", "protein_abundance_rank", "protein_residual_rank", "multi_omics_utr_rank",
         "cluster_diverse_evidence_score", "model_support_score", "has_proteomics_label"
     ] if c in lib.columns]
@@ -717,6 +808,12 @@ def main():
         "",
         "[Group counts]",
         lib["library_group"].value_counts(dropna=False).to_string(),
+        "",
+        "[Selection phase counts]",
+        lib.get("selection_phase", pd.Series("primary", index=lib.index)).fillna("primary").value_counts().to_string(),
+        "",
+        "J_fill_policy: disabled",
+        f"J_fill_selected_n: {int(lib['library_group'].astype(str).str.startswith('J_').sum())}",
         "",
         "[Selection source counts]",
         lib["selection_source"].value_counts(dropna=False).to_string() if "selection_source" in lib.columns else "NA",
@@ -773,6 +870,7 @@ def main():
         f"Saved uAUG=0 dry-run summary: {OUT_UAUG0_DRY_SUMMARY}",
         f"Saved uAUG=0 dry-run shortfall: {OUT_UAUG0_SHORTFALL}",
         f"Saved uAUG=0 replacement candidates: {OUT_UAUG0_REPLACEMENTS}",
+        f"Saved evidence refill audit: {OUT_REFILL_AUDIT}",
     ]
     OUT_QC.write_text("\n".join(q), encoding="utf-8")
     print("[SAVED]", OUT_CSV)
@@ -786,6 +884,7 @@ def main():
     print("[SAVED]", OUT_UAUG0_DRY_SUMMARY)
     print("[SAVED]", OUT_UAUG0_SHORTFALL)
     print("[SAVED]", OUT_UAUG0_REPLACEMENTS)
+    print("[SAVED]", OUT_REFILL_AUDIT)
 
 
 if __name__ == "__main__":

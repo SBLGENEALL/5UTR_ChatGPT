@@ -1,5 +1,33 @@
 # CHANGELOG
 
+## 2026-06-10 - v1.4 PR1 QC audit implementation
+
+Branch:
+
+* `v1.4-pr1-qc-audit`
+
+Baseline:
+
+* Created from `main`.
+* Merged official validated `v1.3` into the PR branch.
+* `main` itself was not modified or merged.
+
+Changes:
+
+* Added accession-to-gene and gene-to-corrected-UTR proteomics audit tables.
+* Added unmapped accession and unmapped gene outputs.
+* Removed generic `J_fill` production selection.
+* Restricted final refill to A/B/C/E evidence, classifier, proteomics, and multiomics pools.
+* Added CHO genome-origin validation using minimap2 or BLASTN.
+* Added length/GC versus TE, heavy model, and protein QC.
+* Added Excel, PPT, PNG chart, and v1.3-versus-v1.4 comparison outputs.
+
+Policy:
+
+* Evidence-only refill shortfalls fail by default.
+* Raw sequence fallback is not silently relabeled as evidence.
+* F/G diversity groups and H negative controls remain part of the library design.
+
 ## 2026-06-10 - v1.3 final library QC staged
 
 Branch:

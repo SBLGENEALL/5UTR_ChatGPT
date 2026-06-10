@@ -20,6 +20,30 @@ python 01_pipeline/scripts/07_heavy_rnafold_kmer6_automl.py
 python 01_pipeline/scripts/08_jaccard_sequence_cluster_qc.py --k 6 --jaccard-threshold 0.85 --containment-threshold 0.90 --cluster-scope all
 python 01_pipeline/scripts/09_cluster_aware_classification_benchmark.py --length-min 20 --length-max 500 --kmax 5 --n-estimators 1000
 python 01_pipeline/scripts/10_select_2000_cluster_diverse_library.py --n 2000 --max-per-cluster 1 --allow-cluster-fill 2
+python 01_pipeline/scripts/11_v14_qc_audit.py --baseline-v1.3 07_library_design/tables/v1.3_selected_2000_library.csv
+```
+
+The v1.4 audit step requires either `minimap2` or BLAST+ (`blastn` and
+`makeblastdb`) on `PATH`. A precomputed PAF or BLAST outfmt 6 table can be
+supplied with `--mapping-table`.
+
+Install the report dependencies before running step 11:
+
+```bash
+python -m pip install -r requirements-v1.4-qc.txt
+```
+
+Audit outputs are written under `08_reports/v1.4_qc_audit/`, including:
+
+```text
+v1.4_qc_audit.xlsx
+v1.4_qc_audit_summary.pptx
+cho_genome_mapping_summary.csv
+suspected_non_CHO_or_hallucinated_sequences.csv
+length_bin_qc.csv
+gc_bin_qc.csv
+v1.3_vs_v1.4_summary.csv
+charts/
 ```
 
 ## TSS atlas step
@@ -55,5 +79,7 @@ In this final release, the input checker treats TSS atlas as required because th
 | 08 | `08_jaccard_sequence_cluster_qc.py` | multiomics labels | `04_te_labeling/tables/tss_corrected_5utr_with_seq_clusters.csv` | Clusters exact/near-duplicate UTRs by k-mer Jaccard/containment. |
 | 09 | `09_cluster_aware_classification_benchmark.py` | sequence-clustered labels | `06_modeling/tables/cluster_aware_classification_benchmark.csv` | Tests high/low classification under gene/sequence-cluster splits. |
 | 10 | `10_select_2000_cluster_diverse_library.py` | clustered labels + evidence scores | final CSV/FASTA in `07_library_design/` | Selects final 2,000 50–100 bp candidates with evidence + diversity balance. |
+
+| 11 | `11_v14_qc_audit.py` | selected library + CHO genome + optional v1.3 library | Excel/PPT/CSV/PNG under `08_reports/v1.4_qc_audit/` | Audits proteomics lineage, CHO genome origin, length/GC evidence behavior, and v1.3-to-v1.4 changes. |
 
 Legacy/basic 1000-candidate scripts and old patch runners are archived under `99_archive/legacy_scripts_pre_numbering/`.

@@ -16,6 +16,8 @@ OUT_LABEL = BASE / "04_te_labeling/tables/tss_corrected_5utr_multiomics_labels.c
 OUT_READY_40_200 = BASE / "04_te_labeling/tables/tss_corrected_5utr_multiomics_training_ready_40_200bp.csv"
 OUT_READY_50_100 = BASE / "04_te_labeling/tables/tss_corrected_5utr_multiomics_selection_ready_50_100bp.csv"
 OUT_PROT_SUMMARY = BASE / "04_te_labeling/qc/proteomics_mapping_summary.txt"
+OUT_PROT_GENE_AUDIT = BASE / "04_te_labeling/tables/proteomics_gene_to_corrected_utr_audit.csv"
+OUT_UNMAPPED_GENES = BASE / "04_te_labeling/tables/proteomics_unmapped_genes.csv"
 
 OUT_LABEL.parent.mkdir(parents=True, exist_ok=True)
 OUT_PROT_SUMMARY.parent.mkdir(parents=True, exist_ok=True)
@@ -177,6 +179,21 @@ def main():
     df["proteomics_mapping_mode"] = np.where(df["protein_abundance_value_by_id"].notna(), "gene_id", np.where(df["protein_abundance_value_by_symbol"].notna(), "gene_symbol", "unmapped"))
     df["has_proteomics_label"] = df["protein_abundance_value"].notna()
 
+    lab_gene_ids = set(df.loc[df["gene_id_key"].astype(str).str.len() > 0, "gene_id_key"].astype(str))
+    lab_symbols = set(df.loc[df["gene_symbol_key"].astype(str).str.len() > 0, "gene_symbol_key"].astype(str))
+    prot_gene_audit = prot[["gene_id_key", "gene_symbol_key", "protein_abundance_value"]].copy()
+    prot_gene_audit["mapped_by_gene_id"] = prot_gene_audit["gene_id_key"].astype(str).isin(lab_gene_ids)
+    prot_gene_audit["mapped_by_gene_symbol"] = prot_gene_audit["gene_symbol_key"].astype(str).isin(lab_symbols)
+    prot_gene_audit["gene_to_corrected_utr_success"] = (
+        prot_gene_audit["mapped_by_gene_id"] | prot_gene_audit["mapped_by_gene_symbol"]
+    )
+    prot_gene_audit = prot_gene_audit.drop_duplicates(
+        subset=["gene_id_key", "gene_symbol_key"], keep="first"
+    )
+    prot_gene_audit.to_csv(OUT_PROT_GENE_AUDIT, index=False)
+    unmapped_genes = prot_gene_audit[~prot_gene_audit["gene_to_corrected_utr_success"]].copy()
+    unmapped_genes.to_csv(OUT_UNMAPPED_GENES, index=False)
+
     pc = 1e-6
     if "rna_day3_cpm_mean" in df.columns and "rna_day6_cpm_mean" in df.columns:
         avg_rna = ((df["rna_day3_cpm_mean"] + df["rna_day6_cpm_mean"]) / 2).fillna(0).values
@@ -210,6 +227,14 @@ def main():
     df[df["multiomics_training_ready_40_200bp"]].to_csv(OUT_READY_40_200, index=False)
     df[df["multiomics_selection_ready_50_100bp"]].to_csv(OUT_READY_50_100, index=False)
 
+    protein_supported_utr_n = int(df["has_proteomics_label"].sum())
+    supported_gene_col = "gene_name" if "gene_name" in df.columns else "gene_symbol_key"
+    protein_supported_gene_n = int(
+        df.loc[df["has_proteomics_label"], supported_gene_col].dropna().astype(str).nunique()
+    )
+    gene_to_utr_success_n = int(prot_gene_audit["gene_to_corrected_utr_success"].sum())
+    gene_to_utr_rate = gene_to_utr_success_n / len(prot_gene_audit) if len(prot_gene_audit) else np.nan
+
     lines = [
         "Proteomics / multi-omics mapping summary - NCBI gene-id aware",
         "="*90,
@@ -218,8 +243,12 @@ def main():
         f"abundance_columns: {ab_cols}",
         f"proteomics_gene_ids: {prot_summary_id['gene_id_key'].nunique()}",
         f"proteomics_symbols: {prot_summary_sym['gene_symbol_key'].nunique()}",
+        f"gene_to_corrected_UTR_mapped_count: {gene_to_utr_success_n}",
+        f"gene_to_corrected_UTR_mapping_success_rate: {gene_to_utr_rate:.6f}",
+        f"unmapped_proteomics_gene_count: {len(unmapped_genes)}",
         f"UTR_rows: {len(df)}",
-        f"UTR_rows_with_proteomics_label: {int(df['has_proteomics_label'].sum())}",
+        f"protein_supported_UTR_count: {protein_supported_utr_n}",
+        f"protein_supported_gene_count: {protein_supported_gene_n}",
         f"UTR_rows_mapped_by_gene_id: {int((df['proteomics_mapping_mode']=='gene_id').sum())}",
         f"UTR_rows_mapped_by_gene_symbol: {int((df['proteomics_mapping_mode']=='gene_symbol').sum())}",
         f"UTR_rows_training_ready_40_200: {int(train_ready.sum())}",
@@ -236,6 +265,9 @@ def main():
         "",
         "[multi omics UTR rank]",
         df["multi_omics_utr_rank"].describe().to_string(),
+        "",
+        f"gene_audit_csv: {OUT_PROT_GENE_AUDIT}",
+        f"unmapped_gene_csv: {OUT_UNMAPPED_GENES}",
     ]
     OUT_PROT_SUMMARY.write_text("\n".join(lines), encoding="utf-8")
     print("[SAVED]", OUT_LABEL)

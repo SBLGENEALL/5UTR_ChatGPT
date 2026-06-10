@@ -2,6 +2,26 @@
 
 Last updated: 2026-06-10
 
+## v1.4 PR1 Development State
+
+Active branch:
+
+* `v1.4-pr1-qc-audit`
+
+Baseline:
+
+* Branch created from `main`.
+* Official validated `v1.3` merged into the PR branch only.
+* `main` remains unchanged.
+
+PR1 scope:
+
+* Proteomics accession-to-gene-to-corrected-UTR mapping audit.
+* Evidence-only replacement of legacy `J_fill`.
+* CHO genome-origin remapping of the selected library.
+* Length/GC versus TE, heavy-model, and protein QC.
+* Excel, PPT, chart, and v1.3-versus-v1.4 comparison outputs.
+
 ## 1. Current Project State
 
 Repository:
