@@ -1,5 +1,50 @@
 # CHANGELOG
 
+## 2026-06-10 - v1.3 final library QC staged
+
+Branch:
+
+* `v1.3`
+
+Status:
+
+* PR3-2 workstation validation passed.
+* v1.3 is the validated baseline to preserve before v1.4 development.
+* No merge to `main` was performed.
+
+Final QC:
+
+```text
+selected_n: 2000
+requested_n: 2000
+uaug_positive_n: 0
+uaug0_policy_pass: True
+n_unique_seq_clusters: 1937
+max_per_seq_cluster: 2
+cluster_cap: 2
+cluster_cap_pass: True
+gene_key: gene_name
+n_unique_genes: 1896
+max_per_gene: 3
+gene_cap: 4
+gene_cap_pass: True
+mean_heavy_ensemble_score: 0.5811515
+mean_robust_public_te_rank: 0.642380
+```
+
+Committed QC artifact:
+
+```text
+07_library_design/qc/v1.3_final_library_qc_summary.txt
+```
+
+Exclusions:
+
+* Raw data.
+* Intermediate tables and FASTA files.
+* Caches and logs.
+* Unvalidated generated outputs.
+
 ## 2026-06-05 - PR3-1 planned: uAUG source audit and uAUG=0 dry-run reporting
 
 Branch:

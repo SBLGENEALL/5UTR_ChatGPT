@@ -1,6 +1,6 @@
 # 5UTR Engineering MASTER
 
-Last updated: 2026-06-04
+Last updated: 2026-06-10
 
 ## 1. Current Project State
 
@@ -14,12 +14,36 @@ Stable branch:
 * Initial stable numbered pipeline release.
 * Do not replace `main` until PR2/PR3 and release documentation are complete.
 
-Current validated working baseline:
+Current validated release branch:
 
-* `improved-v1.2`
-* Defined from validated PR2 branch `improved-v1.1-pr2-tss-expression`.
-* PR2 full raw-data validation passed on company workstation.
-* This is now the recommended baseline for PR3 development.
+* `v1.3`
+* Defined from validated PR3-2 uAUG0 production selection.
+* PR3-2 workstation validation passed.
+* This is the clean baseline to preserve before starting v1.4 development.
+
+Validated v1.3 final library QC:
+
+* `selected_n = 2000`
+* `requested_n = 2000`
+* `uaug_positive_n = 0`
+* `uaug0_policy_pass = True`
+* `n_unique_seq_clusters = 1937`
+* `max_per_seq_cluster = 2`
+* `cluster_cap = 2`
+* `cluster_cap_pass = True`
+* `gene_key = gene_name`
+* `n_unique_genes = 1896`
+* `max_per_gene = 3`
+* `gene_cap = 4`
+* `gene_cap_pass = True`
+* `mean_heavy_ensemble_score = 0.5811515`
+* `mean_robust_public_te_rank = 0.642380`
+
+Release handling:
+
+* Do not merge `v1.3` into `main` as part of this QC staging commit.
+* Do not include raw data, caches, logs, or intermediate outputs.
+* Preserve only the validated final-library QC summary in Git.
 
 Previous validated baseline:
 
