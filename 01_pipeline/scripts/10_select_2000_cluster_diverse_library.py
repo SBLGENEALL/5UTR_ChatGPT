@@ -28,6 +28,9 @@ OUT_UAUG0_REPLACEMENTS = BASE / "07_library_design/tables/uaug0_replacement_cand
 OUT_UAUG0_VALIDATION = BASE / "07_library_design/qc/uaug0_production_validation_report.txt"
 OUT_REFILL_AUDIT = BASE / "07_library_design/tables/evidence_refill_audit.csv"
 OUT_SELECTION_QC = BASE / "07_library_design/tables/v1.4_selection_policy_qc.csv"
+OUT_SELECTION_BINS = BASE / "07_library_design/tables/v1.4_selection_length_gc_bins.csv"
+OUT_PR2_COMPARISON = BASE / "07_library_design/tables/v1.4_pr3_vs_pr2_comparison_ready.csv"
+CLASSIFIER_BENCHMARK = BASE / "06_modeling/tables/cluster_aware_classification_benchmark.csv"
 for p in [OUT_CSV.parent, OUT_FASTA.parent, OUT_QC.parent, OUT_DIVERSITY.parent, OUT_UAUG_SUMMARY_TXT.parent, OUT_UAUG_SUMMARY_CSV.parent]:
     p.mkdir(parents=True, exist_ok=True)
 
@@ -417,6 +420,111 @@ def evidence_score(df):
     return z
 
 
+def classifier_weight_from_validation(path):
+    default_weight = 0.25
+    p = Path(path) if path else CLASSIFIER_BENCHMARK
+    if not p.exists():
+        return default_weight, np.nan, "default_no_validation_file"
+    try:
+        validation = pd.read_csv(p)
+    except Exception:
+        return default_weight, np.nan, "default_unreadable_validation_file"
+    metric_col = next(
+        (c for c in ["selection_metric", "average_precision", "roc_auc"] if c in validation.columns),
+        None,
+    )
+    if metric_col is None:
+        return default_weight, np.nan, "default_no_supported_metric"
+    metric = pd.to_numeric(validation[metric_col], errors="coerce").dropna()
+    if metric.empty:
+        return default_weight, np.nan, f"default_empty_{metric_col}"
+    best_metric = float(metric.max())
+    scaled_weight = float(np.clip(0.15 + 0.30 * (best_metric - 0.5), 0.15, 0.30))
+    return scaled_weight, best_metric, f"scaled_from_{metric_col}"
+
+
+def composite_weights(classifier_weight):
+    base_other = {
+        "robust_public_te_rank": 0.40,
+        "multi_omics_utr_rank": 0.15,
+        "protein_abundance_rank": 0.10,
+        "protein_residual_rank": 0.05,
+        "tss_confidence_score": 0.05,
+    }
+    other_scale = (1.0 - classifier_weight) / sum(base_other.values())
+    weights = {name: weight * other_scale for name, weight in base_other.items()}
+    weights["model_support_score"] = classifier_weight
+    return weights
+
+
+def add_composite_evidence_score(df, weights):
+    out = df.copy()
+    score = pd.Series(0.0, index=out.index)
+    for column, weight in weights.items():
+        values = (
+            pd.to_numeric(out[column], errors="coerce").clip(lower=0, upper=1).fillna(0)
+            if column in out.columns
+            else pd.Series(0.0, index=out.index)
+        )
+        score += weight * values
+    out["composite_evidence_score"] = score
+    return out
+
+
+def write_pr2_comparison(pr3, pr2_path):
+    pr3_compare = pr3.copy()
+    pr3_compare["selected_pr3"] = True
+    pr3_compare["pr3_library_group"] = pr3_compare.get("library_group", "")
+    pr3_compare["pr3_composite_evidence_score"] = pr3_compare.get("composite_evidence_score", np.nan)
+    pr3_cols = [
+        c for c in [
+            SEQ, "utr_id", "gene_id", "gene_name", "selected_pr3", "pr3_library_group",
+            "pr3_composite_evidence_score", "robust_public_te_rank", "model_support_score",
+            "multi_omics_utr_rank", "protein_abundance_rank", "protein_residual_rank",
+            "tss_confidence_score",
+        ]
+        if c in pr3_compare.columns
+    ]
+    pr3_compare = pr3_compare[pr3_cols].drop_duplicates(subset=[SEQ])
+
+    p = Path(pr2_path) if pr2_path else None
+    if p and p.exists():
+        pr2_supplied = True
+        pr2 = pd.read_csv(p)
+        if SEQ not in pr2.columns:
+            raise SystemExit(f"PR2 comparison file missing {SEQ}: {p}")
+        pr2[SEQ] = pr2[SEQ].map(clean_seq)
+        pr2["selected_pr2"] = True
+        pr2["pr2_library_group"] = pr2.get("library_group", "")
+        pr2_cols = [c for c in [SEQ, "selected_pr2", "pr2_library_group"] if c in pr2.columns]
+        comparison = pr3_compare.merge(
+            pr2[pr2_cols].drop_duplicates(subset=[SEQ]),
+            on=SEQ,
+            how="outer",
+        )
+    else:
+        pr2_supplied = False
+        comparison = pr3_compare.copy()
+        comparison["selected_pr2"] = False
+        comparison["pr2_library_group"] = pd.NA
+    comparison["selected_pr2"] = comparison["selected_pr2"].fillna(False).astype(bool)
+    comparison["selected_pr3"] = comparison["selected_pr3"].fillna(False).astype(bool)
+    comparison["pr2_library_supplied"] = pr2_supplied
+    if pr2_supplied:
+        comparison["status_vs_pr2"] = np.select(
+            [
+                comparison["selected_pr2"] & comparison["selected_pr3"],
+                comparison["selected_pr2"] & ~comparison["selected_pr3"],
+                ~comparison["selected_pr2"] & comparison["selected_pr3"],
+            ],
+            ["retained", "pr2_only", "pr3_only"],
+            default="not_selected",
+        )
+    else:
+        comparison["status_vs_pr2"] = "pr2_not_supplied"
+    comparison.to_csv(OUT_PR2_COMPARISON, index=False)
+
+
 def parse_reference_controls():
     out = []
     csv_path = BASE / "00_raw_data/04_reference_controls/reference_controls.csv"
@@ -472,6 +580,16 @@ def main():
     ap.add_argument("--max-per-cluster", type=int, default=1)
     ap.add_argument("--allow-cluster-fill", type=int, default=2, help="allow this per cluster during final fill if needed")
     ap.add_argument("--max-per-gene", type=int, default=3, help="maximum selected candidates per gene_name/gene_id when available")
+    ap.add_argument(
+        "--classifier-validation",
+        default=str(CLASSIFIER_BENCHMARK),
+        help="optional classifier benchmark CSV used to scale classifier weight",
+    )
+    ap.add_argument(
+        "--pr2-library",
+        default="07_library_design/tables/v1.4_pr2_selected_2000_library.csv",
+        help="optional preserved PR2 selected-library CSV for comparison-ready output",
+    )
     ap.add_argument(
         "--allow-evidence-shortfall",
         action="store_true",
@@ -536,6 +654,11 @@ def main():
         base_cand["has_protein_support"] |
         base_cand["has_classifier_support"]
     )
+    classifier_weight, classifier_validation_metric, classifier_weight_source = (
+        classifier_weight_from_validation(args.classifier_validation)
+    )
+    score_weights = composite_weights(classifier_weight)
+    base_cand = add_composite_evidence_score(base_cand, score_weights)
     evidence_cand = base_cand[base_cand["has_any_evidence_support"]].copy()
 
     print(f"[BASE CANDIDATES] {len(base_cand):,}")
@@ -543,7 +666,7 @@ def main():
     if len(base_cand) < args.n:
         print(f"[WARN] base candidate count {len(base_cand)} < requested {args.n}; output will be smaller unless controls add rows")
 
-    selected = []
+    selected_rows = []
     used_seq = set()
     cluster_counts = defaultdict(int)
     gene_counts = defaultdict(int)
@@ -557,263 +680,173 @@ def main():
             return None
         return str(val)
 
-    def can_take(row, max_per):
+    def can_take(row):
         seq = row[SEQ]
         cid = str(row.get("seq_cluster_id", seq))
         gkey = gene_key(row)
         gene_ok = gkey is None or gene_counts[gkey] < args.max_per_gene
-        return seq not in used_seq and cluster_counts[cid] < max_per and gene_ok
+        return seq not in used_seq and cluster_counts[cid] < args.allow_cluster_fill and gene_ok
 
-    def take(pool, n, group, sort_cols, ascending=None, max_per_cluster=None, source=None):
-        nonlocal selected, used_seq, cluster_counts
-        source = source or group
-        if max_per_cluster is None:
-            max_per_cluster = args.max_per_cluster
+    phase_audit_rows = []
+
+    def take_ranked(pool, n, group, source, sort_cols, ascending=None, phase=None):
+        if n <= 0 or len(selected_rows) >= args.n:
+            return 0
+        available_sort_cols = [c for c in sort_cols if c in pool.columns]
+        if not available_sort_cols:
+            available_sort_cols = ["composite_evidence_score"]
         if ascending is None:
-            ascending = [False] * len(sort_cols)
-        p = pool.copy()
-        p = p.sort_values(sort_cols, ascending=ascending)
-        rows = []
+            ascending = [False] * len(available_sort_cols)
+        else:
+            ascending = ascending[:len(available_sort_cols)]
+        p = pool[~pool[SEQ].isin(used_seq)].sort_values(
+            available_sort_cols,
+            ascending=ascending,
+            kind="mergesort",
+        )
+        selected_this_phase = 0
         for _, row in p.iterrows():
-            if len(rows) >= n:
+            if selected_this_phase >= n or len(selected_rows) >= args.n:
                 break
-            if can_take(row, max_per_cluster):
-                rows.append(row)
+            if can_take(row):
+                row = row.copy()
+                row["library_group"] = group
+                row["selection_source"] = source
+                row["selection_phase"] = phase or source
+                selected_rows.append(row)
                 used_seq.add(row[SEQ])
                 cluster_counts[str(row.get("seq_cluster_id", row[SEQ]))] += 1
                 gkey = gene_key(row)
                 if gkey is not None:
                     gene_counts[gkey] += 1
-        if rows:
-            out = pd.DataFrame(rows)
-            out["library_group"] = group
-            out["selection_source"] = source
-            selected.append(out)
-            print(f"  take {group}: {len(out)}/{n}")
-        else:
-            print(f"  take {group}: 0/{n}")
-        return len(rows)
+                selected_this_phase += 1
+        phase_audit_rows.append({
+            "selection_phase": phase or source,
+            "library_group": group,
+            "selection_source": source,
+            "requested_n": n,
+            "available_pool_n": len(pool),
+            "selected_n": selected_this_phase,
+            "cumulative_selected_n": len(selected_rows),
+        })
+        print(f"  take {group}: {selected_this_phase}/{n}")
+        return selected_this_phase
 
-    # v1.4 primary targets deliberately differ from v1.3: expand non-J evidence
-    # groups and reduce H controls. Any remaining shortage is filled by K1-K4.
-    quotas = {
-        "A_publicTE_high_confidence": 550,
-        "B_TE_model_classifier_supported": 350,
-        "C_protein_abundance_supported": 300,
-        "D_protein_residual_supported": 250,
-        "E_multiomics_consensus_high": 300,
-        "F_sequence_diverse_exploratory": 150,
-        "G_length_GC_uAUG_diversity": 50,
-        "H_low_signal_negative_controls": 50,
-    }
-
-    take(
-        evidence_cand[evidence_cand["has_robust_public_te_support"]],
-        quotas["A_publicTE_high_confidence"],
-        "A_publicTE_high_confidence",
-        ["robust_public_te_rank", "day_consensus_TE_rank" if "day_consensus_TE_rank" in evidence_cand.columns else "cluster_diverse_evidence_score"],
-        source="evidence_cand_robust_public_te",
+    # 1. Reserve exactly 50 low-signal negative controls when cap-feasible.
+    h_target = min(50, args.n)
+    low_signal = base_cand.copy()
+    low_signal["negative_control_priority"] = (
+        1.0 - pd.to_numeric(low_signal["robust_public_te_rank"], errors="coerce").fillna(0.5)
     )
-    take(
+    h_taken = take_ranked(
+        low_signal[pd.to_numeric(low_signal["robust_public_te_rank"], errors="coerce").le(0.30)],
+        h_target,
+        "H_negative_controls",
+        "low_robust_public_te",
+        ["negative_control_priority", "composite_evidence_score"],
+        phase="negative_control_reserve",
+    )
+    if h_taken < h_target:
+        take_ranked(
+            low_signal,
+            h_target - h_taken,
+            "H_negative_controls",
+            "lowest_composite_fallback",
+            ["composite_evidence_score"],
+            ascending=[True],
+            phase="negative_control_reserve",
+        )
+
+    # 2. Evidence floors. Existing selections count toward each floor.
+    def selected_support_count(column):
+        if not selected_rows:
+            return 0
+        selected_df = pd.DataFrame(selected_rows)
+        return int(optional_bool_gate(selected_df, column, default=False).sum())
+
+    protein_available_n = int(base_cand["has_protein_support"].sum())
+    protein_floor_target = min(300, protein_available_n)
+    protein_needed = max(0, protein_floor_target - selected_support_count("has_protein_support"))
+    take_ranked(
+        evidence_cand[evidence_cand["has_protein_support"]],
+        protein_needed,
+        "P_protein_evidence_floor",
+        "protein_supported_composite_rank",
+        ["composite_evidence_score", "protein_abundance_rank", "protein_residual_rank"],
+        phase="protein_evidence_floor",
+    )
+
+    classifier_available_n = int(base_cand["has_classifier_support"].sum())
+    classifier_floor_target = min(800, classifier_available_n)
+    classifier_needed = max(
+        0,
+        classifier_floor_target - selected_support_count("has_classifier_support"),
+    )
+    take_ranked(
         evidence_cand[evidence_cand["has_classifier_support"]],
-        quotas["B_TE_model_classifier_supported"],
-        "B_TE_model_classifier_supported",
-        ["model_support_score", "robust_public_te_rank"],
-        source="evidence_cand_classifier_supported",
+        classifier_needed,
+        "C_classifier_evidence_floor",
+        "classifier_supported_composite_rank",
+        ["composite_evidence_score", "model_support_score"],
+        phase="classifier_evidence_floor",
     )
 
-    if "protein_abundance_rank" in evidence_cand.columns:
-        take(evidence_cand[evidence_cand["protein_abundance_rank"].notna()], quotas["C_protein_abundance_supported"], "C_protein_abundance_supported", ["protein_abundance_rank", "cluster_diverse_evidence_score"], source="evidence_cand")
-    if "protein_residual_rank" in evidence_cand.columns:
-        take(evidence_cand[evidence_cand["protein_residual_rank"].notna()], quotas["D_protein_residual_supported"], "D_protein_residual_supported", ["protein_residual_rank", "cluster_diverse_evidence_score"], source="evidence_cand")
-    if "multi_omics_utr_rank" in evidence_cand.columns:
-        take(
-            evidence_cand[evidence_cand["has_multiomics_support"]],
-            quotas["E_multiomics_consensus_high"],
-            "E_multiomics_consensus_high",
-            ["multi_omics_utr_rank", "cluster_diverse_evidence_score"],
-            source="evidence_cand_multiomics_supported",
-        )
-
-    # Exploratory: start with mid/high public TE when available, then allow clean no-evidence sequences.
-    robust_rank = pd.to_numeric(base_cand["robust_public_te_rank"], errors="coerce")
-    exploratory = base_cand[robust_rank.between(0.35, 0.90)].copy()
-    no_evidence_exploratory = base_cand[robust_rank.isna()].copy()
-    if len(no_evidence_exploratory):
-        exploratory = pd.concat([exploratory, no_evidence_exploratory], ignore_index=True, sort=False)
-    exploratory["length_bin"] = pd.cut(exploratory["length"], [49, 60, 75, 90, 100], labels=["50-60", "61-75", "76-90", "91-100"])
-    exploratory["gc_bin"] = pd.cut(exploratory["gc_content"], [0.299, 0.45, 0.60, 0.75], labels=["30-45", "45-60", "60-75"])
-    exploratory["diversity_key"] = exploratory["length_bin"].astype(str) + ":" + exploratory["gc_bin"].astype(str) + ":uAUG" + exploratory["uaug_count"].astype(str)
-    # Interleave by diversity key
-    exp_rows = []
-    for _, g in exploratory.sort_values("cluster_diverse_evidence_score", ascending=False).groupby("diversity_key", dropna=False):
-        exp_rows.append(g.head(max(1, quotas["F_sequence_diverse_exploratory"] // max(1, exploratory["diversity_key"].nunique()))))
-    exp_pool = pd.concat(exp_rows).sort_values("cluster_diverse_evidence_score", ascending=False) if exp_rows else exploratory
-    take(exp_pool, quotas["F_sequence_diverse_exploratory"], "F_sequence_diverse_exploratory", ["cluster_diverse_evidence_score", "robust_public_te_rank"], source="base_cand_exploratory")
-
-    diversity = base_cand.copy()
-    diversity["diversity_score"] = (
-        (1 - abs(pd.to_numeric(diversity["gc_content"], errors="coerce") - 0.52)) +
-        (1 - abs(pd.to_numeric(diversity["length"], errors="coerce") - 75) / 50) +
-        0.2 * (diversity["uaug_count"] == 0).astype(float)
+    # 3. Reserve 100 exploratory rows interleaved across length/GC bins.
+    diversity_target = min(100, max(0, args.n - len(selected_rows)))
+    diversity_pool = evidence_cand.copy()
+    diversity_pool["length_bin"] = pd.cut(
+        pd.to_numeric(diversity_pool["length"], errors="coerce"),
+        [49, 60, 75, 90, 100],
+        labels=["50-60", "61-75", "76-90", "91-100"],
     )
-    take(diversity, quotas["G_length_GC_uAUG_diversity"], "G_length_GC_uAUG_diversity", ["diversity_score", "cluster_diverse_evidence_score"], source="base_cand_diversity")
+    diversity_pool["gc_bin"] = pd.cut(
+        pd.to_numeric(diversity_pool["gc_content"], errors="coerce"),
+        [0.299, 0.45, 0.60, 0.75],
+        labels=["30-45", "45-60", "60-75"],
+    )
+    diversity_pool["diversity_key"] = (
+        diversity_pool["length_bin"].astype(str) + "|" +
+        diversity_pool["gc_bin"].astype(str)
+    )
+    diversity_pool = diversity_pool.sort_values(
+        "composite_evidence_score",
+        ascending=False,
+        kind="mergesort",
+    )
+    diversity_pool["diversity_round"] = diversity_pool.groupby(
+        "diversity_key",
+        dropna=False,
+    ).cumcount()
+    take_ranked(
+        diversity_pool,
+        diversity_target,
+        "F_diversity_exploratory",
+        "length_gc_round_robin",
+        ["diversity_round", "composite_evidence_score"],
+        ascending=[True, False],
+        phase="diversity_reserve",
+    )
 
-    low = base_cand.copy()
-    low["low_score"] = 1 - pd.to_numeric(low["robust_public_te_rank"], errors="coerce").fillna(1)
-    if "protein_abundance_rank" in low.columns:
-        low["low_score"] += (1 - pd.to_numeric(low["protein_abundance_rank"], errors="coerce").fillna(1)) * 0.25
-    if "protein_residual_rank" in low.columns:
-        low["low_score"] += (1 - pd.to_numeric(low["protein_residual_rank"], errors="coerce").fillna(1)) * 0.25
-    h_taken = take(low[pd.to_numeric(low["robust_public_te_rank"], errors="coerce") <= 0.30], quotas["H_low_signal_negative_controls"], "H_low_signal_negative_controls", ["low_score", "gc_content"], source="base_cand_low_publicTE")
-    if h_taken < quotas["H_low_signal_negative_controls"]:
-        no_evidence_low = low[pd.to_numeric(low["robust_public_te_rank"], errors="coerce").isna()].copy()
-        no_evidence_low["clean_control_score"] = (
-            (1 - abs(pd.to_numeric(no_evidence_low["gc_content"], errors="coerce") - 0.52)) +
-            (1 - abs(pd.to_numeric(no_evidence_low["length"], errors="coerce") - 75) / 50) +
-            0.2 * (pd.to_numeric(no_evidence_low["uaug_count"], errors="coerce").fillna(999) == 0).astype(float)
-        )
-        take(no_evidence_low, quotas["H_low_signal_negative_controls"] - h_taken, "H_low_signal_negative_controls", ["clean_control_score"], source="base_cand_no_TE_clean_control")
+    # 4. Fill all remaining slots by the composite score from any-evidence rows.
+    take_ranked(
+        evidence_cand,
+        args.n - len(selected_rows),
+        "S_composite_evidence_ranked",
+        "highest_composite_any_evidence",
+        ["composite_evidence_score", "robust_public_te_rank", "model_support_score"],
+        phase="composite_score_fill",
+    )
 
-    lib = pd.concat(selected, ignore_index=True) if selected else base_cand.head(0)
-
-    # add reference controls up to 50 if present, without enforcing cluster.
-    controls = parse_reference_controls()
-    if len(controls):
-        controls = prep(controls)
-        controls = controls[pd.to_numeric(controls["uaug_count"], errors="coerce").fillna(999).eq(0)].copy()
-        controls["library_group"] = "I_reference_controls"
-        controls["selection_source"] = "reference_control"
-        controls["is_reference_control"] = True
-        controls["cluster_diverse_evidence_score"] = np.nan
-        controls = controls.head(50)
-        lib["is_reference_control"] = False
-        lib = pd.concat([lib, controls], ignore_index=True, sort=False)
-        print(f"  added reference controls: {len(controls)}")
-    else:
-        lib["is_reference_control"] = False
-        print("  reference controls: none found")
-
-    # Ordered non-J refill. Each K pool is constrained by the same sequence QC,
-    # gene cap, and relaxed sequence-cluster cap used for the final library.
-    refill_audit_rows = []
-    if len(lib) < args.n:
-        used_seq = set(lib[SEQ])
-        cluster_counts = defaultdict(int, lib[~lib["is_reference_control"].fillna(False)].groupby("seq_cluster_id").size().to_dict() if "seq_cluster_id" in lib.columns else {})
-        gene_col_for_cap = choose_gene_column(lib)
-        gene_counts = defaultdict(int, nonempty_series(lib, gene_col_for_cap).value_counts().to_dict() if gene_col_for_cap else {})
-        fill = []
-        fill_group_counts = defaultdict(int)
-
-        def fill_from(pool, group, source, sort_cols, limit=None):
-            nonlocal fill
-            available_sort_cols = [c for c in sort_cols if c in pool.columns]
-            if not available_sort_cols:
-                available_sort_cols = ["cluster_diverse_evidence_score"]
-            p = pool[~pool[SEQ].isin(used_seq)].sort_values(available_sort_cols, ascending=False)
-            selected_this_call = 0
-            for _, row in p.iterrows():
-                if len(lib) + len(fill) >= args.n:
-                    break
-                if limit is not None and selected_this_call >= limit:
-                    break
-                cid = str(row.get("seq_cluster_id", row[SEQ]))
-                gkey = gene_key(row)
-                gene_ok = gkey is None or gene_counts[gkey] < args.max_per_gene
-                if cluster_counts[cid] < args.allow_cluster_fill and gene_ok:
-                    row = row.copy()
-                    row["selection_source"] = source
-                    row["selection_phase"] = "non_j_relaxed_refill"
-                    row["library_group"] = group
-                    fill.append(row)
-                    used_seq.add(row[SEQ])
-                    cluster_counts[cid] += 1
-                    if gkey is not None:
-                        gene_counts[gkey] += 1
-                    fill_group_counts[group] += 1
-                    selected_this_call += 1
-            return selected_this_call
-
-        k4_pool = base_cand.copy()
-        k4_pool["length_bin"] = pd.cut(
-            pd.to_numeric(k4_pool["length"], errors="coerce"),
-            [49, 60, 75, 90, 100],
-            labels=False,
-        )
-        k4_pool["gc_bin"] = pd.cut(
-            pd.to_numeric(k4_pool["gc_content"], errors="coerce"),
-            [0.299, 0.45, 0.60, 0.75],
-            labels=False,
-        )
-        diversity_frequency = k4_pool.groupby(["length_bin", "gc_bin"], dropna=False)[SEQ].transform("count")
-        k4_pool["relaxed_diversity_score"] = (
-            1.0 / diversity_frequency.clip(lower=1) +
-            0.25 * pd.to_numeric(k4_pool["cluster_diverse_evidence_score"], errors="coerce").fillna(0)
-        )
-        refill_specs = [
-            (
-                "K1_ABE_evidence_relaxed",
-                evidence_cand[
-                    evidence_cand["has_robust_public_te_support"] |
-                    evidence_cand["has_multiomics_support"]
-                ],
-                "K1_unselected_robust_or_multiomics",
-                ["robust_public_te_rank", "multi_omics_utr_rank", "cluster_diverse_evidence_score"],
-            ),
-            (
-                "K2_CD_proteomics_relaxed",
-                base_cand[base_cand["has_protein_support"]],
-                "K2_unselected_CD_proteomics",
-                ["protein_abundance_rank", "protein_residual_rank", "cluster_diverse_evidence_score"],
-            ),
-            (
-                "K3_classifier_model_relaxed",
-                base_cand[base_cand["has_classifier_support"]],
-                "K3_unselected_classifier_model",
-                ["model_support_score", "robust_public_te_rank", "cluster_diverse_evidence_score"],
-            ),
-            (
-                "K4_FG_diversity_relaxed",
-                k4_pool,
-                "K4_unselected_FG_diversity",
-                ["relaxed_diversity_score", "cluster_diverse_evidence_score"],
-            ),
-        ]
-        for group, pool, source, sort_cols in refill_specs:
-            target = args.n - len(lib) - len(fill)
-            selected_n = fill_from(pool, group, source, sort_cols)
-            refill_audit_rows.append({
-                "library_group": group,
-                "selection_source": source,
-                "refill_pass": "ordered_K",
-                "target_refill_n": target,
-                "available_pool_n": len(pool),
-                "selected_refill_n": selected_n,
-            })
-            if len(lib) + len(fill) >= args.n:
-                break
-
-        if fill:
-            f = pd.DataFrame(fill)
-            f["is_reference_control"] = False
-            lib = pd.concat([lib, f], ignore_index=True, sort=False)
-            print(f"  non-J K refill: {len(f)}; groups={dict(fill_group_counts)}")
-
-    pd.DataFrame(
-        refill_audit_rows,
-        columns=[
-            "library_group", "selection_source", "refill_pass", "target_refill_n",
-            "available_pool_n", "selected_refill_n",
-        ],
-    ).to_csv(OUT_REFILL_AUDIT, index=False)
-
+    lib = pd.DataFrame(selected_rows) if selected_rows else base_cand.head(0)
+    lib["is_reference_control"] = False
+    pd.DataFrame(phase_audit_rows).to_csv(OUT_REFILL_AUDIT, index=False)
     lib = lib.drop_duplicates(subset=[SEQ], keep="first").head(args.n).copy()
 
     if len(lib) < args.n and not args.allow_evidence_shortfall:
         raise SystemExit(
-            f"Non-J refill shortfall: selected {len(lib)} of {args.n}. "
-            "J_fill is disabled and the filtered K1-K4 pools could not satisfy the caps. Review the "
-            "candidate pool or use "
+            f"Composite evidence selection shortfall: selected {len(lib)} of {args.n}. "
+            "J_fill is disabled and the any-evidence pool could not satisfy gene/cluster caps. "
+            "Review the candidate pool or use "
             "--allow-evidence-shortfall for audit-only output."
         )
 
@@ -834,10 +867,6 @@ def main():
             f"Sequence-cluster cap violation: observed {final_max_cluster}, allowed {args.allow_cluster_fill}"
         )
 
-    prefix_counts = {
-        prefix: int(group_text.str.startswith("K" if prefix == "K" else f"{prefix}_").sum())
-        for prefix in "ABCDEFGHK"
-    }
     protein_selected = int(optional_bool_gate(lib, "has_protein_support", default=False).sum())
     classifier_selected = int(optional_bool_gate(lib, "has_classifier_support", default=False).sum())
     multiomics_selected = int(optional_bool_gate(lib, "has_multiomics_support", default=False).sum())
@@ -850,24 +879,97 @@ def main():
         base_cand["has_multiomics_support"] &
         ~base_cand["has_robust_public_te_support"]
     )
+    robust_selected = pd.to_numeric(lib["robust_public_te_rank"], errors="coerce")
+    heavy_selected = (
+        pd.to_numeric(lib["heavy_ensemble_score"], errors="coerce")
+        if "heavy_ensemble_score" in lib.columns
+        else pd.Series(np.nan, index=lib.index)
+    )
+    diversity_selected = int(group_text.eq("F_diversity_exploratory").sum())
+    group_counts = lib["library_group"].value_counts(dropna=False)
+    source_counts = lib["selection_source"].value_counts(dropna=False)
+    length_bin_values = pd.cut(
+        pd.to_numeric(lib["length"], errors="coerce"),
+        [49, 60, 75, 90, 100],
+        labels=["50-60", "61-75", "76-90", "91-100"],
+    )
+    gc_bin_values = pd.cut(
+        pd.to_numeric(lib["gc_content"], errors="coerce"),
+        [0.299, 0.45, 0.60, 0.75],
+        labels=["30-45", "45-60", "60-75"],
+    )
+    length_bin_counts = length_bin_values.value_counts(dropna=False)
+    gc_bin_counts = gc_bin_values.value_counts(dropna=False)
     selection_qc = {
         "selected_n": len(lib),
         "requested_n": args.n,
         "shortage_n": max(0, args.n - len(lib)),
         "J_fill_selected_n": j_fill_selected_n,
         "evidence_candidate_n": len(evidence_cand),
+        "mean_robust_public_te_rank": float(robust_selected.mean()) if robust_selected.notna().any() else np.nan,
+        "mean_heavy_ensemble_score": float(heavy_selected.mean()) if heavy_selected.notna().any() else np.nan,
         "multiomics_without_robust_candidate_n": int(multiomics_without_robust_candidate_mask.sum()),
-        **{f"{prefix}_count": prefix_counts[prefix] for prefix in "ABCDEFGHK"},
         "total_protein_supported_selected_count": protein_selected,
         "total_classifier_supported_selected_count": classifier_selected,
         "total_multiomics_supported_selected_count": multiomics_selected,
         "multiomics_without_robust_selected_count": multiomics_without_robust_selected,
+        "protein_supported_available_n": protein_available_n,
+        "protein_floor_target_n": protein_floor_target,
+        "protein_floor_pass": protein_selected >= protein_floor_target,
+        "classifier_supported_available_n": classifier_available_n,
+        "classifier_floor_target_n": classifier_floor_target,
+        "classifier_floor_pass": classifier_selected >= classifier_floor_target,
+        "diversity_exploratory_target_n": diversity_target,
+        "diversity_exploratory_selected_n": diversity_selected,
+        "diversity_floor_pass": diversity_selected >= diversity_target,
+        "classifier_validation_metric": classifier_validation_metric,
+        "classifier_weight": classifier_weight,
+        "classifier_weight_source": classifier_weight_source,
+        **{f"weight_{name}": weight for name, weight in score_weights.items()},
+        **{
+            f"group_count_{re.sub(r'[^A-Za-z0-9]+', '_', str(name)).strip('_')}": int(count)
+            for name, count in group_counts.items()
+        },
+        **{
+            f"source_count_{re.sub(r'[^A-Za-z0-9]+', '_', str(name)).strip('_')}": int(count)
+            for name, count in source_counts.items()
+        },
+        **{
+            f"length_bin_count_{re.sub(r'[^A-Za-z0-9]+', '_', str(name)).strip('_')}": int(count)
+            for name, count in length_bin_counts.items()
+        },
+        **{
+            f"gc_bin_count_{re.sub(r'[^A-Za-z0-9]+', '_', str(name)).strip('_')}": int(count)
+            for name, count in gc_bin_counts.items()
+        },
         "max_per_gene": final_max_gene,
         "gene_cap": args.max_per_gene,
         "max_per_seq_cluster": final_max_cluster,
         "seq_cluster_cap": args.allow_cluster_fill,
     }
     pd.DataFrame([selection_qc]).to_csv(OUT_SELECTION_QC, index=False)
+
+    lib["length_bin"] = length_bin_values
+    lib["gc_bin"] = gc_bin_values
+    support_flags = [
+        ("robust_public_te", "has_robust_public_te_support"),
+        ("classifier_model", "has_classifier_support"),
+        ("multiomics", "has_multiomics_support"),
+        ("protein", "has_protein_support"),
+    ]
+    lib["evidence_source_signature"] = lib.apply(
+        lambda row: "+".join(
+            label for label, column in support_flags
+            if bool(row.get(column, False))
+        ) or "negative_control_no_evidence",
+        axis=1,
+    )
+    count_tables = []
+    for dimension in ["length_bin", "gc_bin", "library_group", "selection_source", "evidence_source_signature"]:
+        counts = lib[dimension].astype(str).value_counts(dropna=False).rename_axis("bin_or_category").reset_index(name="selected_n")
+        counts.insert(0, "dimension", dimension)
+        count_tables.append(counts)
+    pd.concat(count_tables, ignore_index=True).to_csv(OUT_SELECTION_BINS, index=False)
 
     lib["library_index"] = np.arange(1, len(lib) + 1)
 
@@ -877,9 +979,10 @@ def main():
         "selection_source", "is_expressed_public", "expression_qc_reason",
         "selection_phase",
         "robust_public_te_rank", "day_consensus_TE_rank", "protein_abundance_rank", "protein_residual_rank", "multi_omics_utr_rank",
-        "cluster_diverse_evidence_score", "model_support_score", "has_proteomics_label",
+        "composite_evidence_score", "cluster_diverse_evidence_score", "model_support_score", "has_proteomics_label",
         "has_protein_support", "has_classifier_support", "has_multiomics_support",
-        "has_robust_public_te_support", "has_any_evidence_support"
+        "has_robust_public_te_support", "has_any_evidence_support",
+        "length_bin", "gc_bin", "evidence_source_signature"
     ] if c in lib.columns]
     lib = lib[front + [c for c in lib.columns if c not in front]]
     lib.to_csv(OUT_CSV, index=False)
@@ -887,10 +990,10 @@ def main():
     write_final_diversity_summary(lib, OUT_DIVERSITY)
     write_uaug_audit(lib)
     write_uaug0_validation_report(lib, OUT_UAUG0_VALIDATION, args.n, args.allow_cluster_fill, args.max_per_gene)
-    dry_run_select_uaug0(base_cand, args, quotas, lib)
+    write_pr2_comparison(lib, args.pr2_library)
 
     q = [
-        "Cluster-diverse evidence-balanced 2000 library summary",
+        "Logical composite-evidence selection summary",
         "=" * 100,
         f"input: {path}",
         f"candidate_pool_after_QC: {len(base_cand)}",
@@ -898,10 +1001,15 @@ def main():
         f"requested_n: {args.n}",
         f"selected_n: {len(lib)}",
         f"shortage_n: {selection_qc['shortage_n']}",
-        f"max_per_cluster_primary: {args.max_per_cluster}",
         f"allow_cluster_fill: {args.allow_cluster_fill}",
         f"max_per_gene: {args.max_per_gene}",
         "uaug_policy: production_hard_filter_uaug_count_eq_0",
+        "J_fill_policy: disabled",
+        "",
+        "[Composite score weights]",
+        f"classifier_validation_metric: {classifier_validation_metric}",
+        f"classifier_weight_source: {classifier_weight_source}",
+        "\n".join(f"{name}: {weight:.6f}" for name, weight in score_weights.items()),
         "",
         "[Group counts]",
         lib["library_group"].value_counts(dropna=False).to_string(),
@@ -909,11 +1017,16 @@ def main():
         "[Selection phase counts]",
         lib.get("selection_phase", pd.Series("primary", index=lib.index)).fillna("primary").value_counts().to_string(),
         "",
-        "J_fill_policy: disabled",
         f"J_fill_selected_n: {selection_qc['J_fill_selected_n']}",
         "",
-        "[Required v1.4 group totals]",
-        "\n".join(f"{prefix}_count: {selection_qc[f'{prefix}_count']}" for prefix in "ABCDEFGHK"),
+        "[Evidence floors]",
+        f"protein: {protein_selected}/{protein_floor_target} pass={selection_qc['protein_floor_pass']}",
+        f"classifier: {classifier_selected}/{classifier_floor_target} pass={selection_qc['classifier_floor_pass']}",
+        f"diversity exploratory: {diversity_selected}/{diversity_target} pass={selection_qc['diversity_floor_pass']}",
+        "",
+        "[Evidence coverage]",
+        f"mean_robust_public_te_rank: {selection_qc['mean_robust_public_te_rank']}",
+        f"mean_heavy_ensemble_score: {selection_qc['mean_heavy_ensemble_score']}",
         f"total_protein_supported_selected_count: {selection_qc['total_protein_supported_selected_count']}",
         f"total_classifier_supported_selected_count: {selection_qc['total_classifier_supported_selected_count']}",
         f"total_multiomics_supported_selected_count: {selection_qc['total_multiomics_supported_selected_count']}",
@@ -922,6 +1035,15 @@ def main():
         "",
         "[Selection source counts]",
         lib["selection_source"].value_counts(dropna=False).to_string() if "selection_source" in lib.columns else "NA",
+        "",
+        "[Length bin counts]",
+        lib["length_bin"].value_counts(dropna=False).sort_index().to_string(),
+        "",
+        "[GC bin counts]",
+        lib["gc_bin"].value_counts(dropna=False).sort_index().to_string(),
+        "",
+        "[Evidence source signature counts]",
+        lib["evidence_source_signature"].value_counts(dropna=False).to_string(),
         "",
         "[Cluster counts in final library]",
         lib["seq_cluster_id"].value_counts().describe().to_string() if "seq_cluster_id" in lib.columns else "No seq_cluster_id column",
@@ -972,11 +1094,10 @@ def main():
         f"Saved uAUG source table: {OUT_UAUG_SUMMARY_CSV}",
         f"Saved uAUG-positive rows: {OUT_UAUG_POSITIVE_CSV}",
         f"Saved uAUG=0 production validation: {OUT_UAUG0_VALIDATION}",
-        f"Saved uAUG=0 dry-run summary: {OUT_UAUG0_DRY_SUMMARY}",
-        f"Saved uAUG=0 dry-run shortfall: {OUT_UAUG0_SHORTFALL}",
-        f"Saved uAUG=0 replacement candidates: {OUT_UAUG0_REPLACEMENTS}",
-        f"Saved evidence refill audit: {OUT_REFILL_AUDIT}",
+        f"Saved selection phase audit: {OUT_REFILL_AUDIT}",
         f"Saved v1.4 selection policy QC: {OUT_SELECTION_QC}",
+        f"Saved length/GC/group/source counts: {OUT_SELECTION_BINS}",
+        f"Saved PR3-vs-PR2 comparison-ready table: {OUT_PR2_COMPARISON}",
     ]
     OUT_QC.write_text("\n".join(q), encoding="utf-8")
     print("[SAVED]", OUT_CSV)
@@ -987,11 +1108,10 @@ def main():
     print("[SAVED]", OUT_UAUG_SUMMARY_CSV)
     print("[SAVED]", OUT_UAUG_POSITIVE_CSV)
     print("[SAVED]", OUT_UAUG0_VALIDATION)
-    print("[SAVED]", OUT_UAUG0_DRY_SUMMARY)
-    print("[SAVED]", OUT_UAUG0_SHORTFALL)
-    print("[SAVED]", OUT_UAUG0_REPLACEMENTS)
     print("[SAVED]", OUT_REFILL_AUDIT)
     print("[SAVED]", OUT_SELECTION_QC)
+    print("[SAVED]", OUT_SELECTION_BINS)
+    print("[SAVED]", OUT_PR2_COMPARISON)
 
 
 if __name__ == "__main__":

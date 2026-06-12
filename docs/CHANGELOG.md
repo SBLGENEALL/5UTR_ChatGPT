@@ -1,5 +1,18 @@
 # CHANGELOG
 
+## 2026-06-12 - v1.4 PR3 logical scoring selection
+
+* Replaced production A-H quota-first drafting and K refill with candidate-level
+  composite evidence scoring.
+* Added adaptive classifier weight scaling from 0.15 to 0.30 when a validation
+  metric is available; all other weights are renormalized.
+* Added fixed H=50 controls, protein/classifier evidence floors, length/GC
+  diversity reserve, and highest-score any-evidence fill.
+* Added score weights, floor pass/fail, means, support totals, bin counts,
+  evidence-source counts, and PR2 comparison-ready outputs.
+* Preserved uAUG0, 50-100 nt, GC, forbidden-site, no-N, gene cap 3,
+  sequence-cluster cap 2, and J-fill 0 policies.
+
 ## 2026-06-12 - v1.4 PR2 multiomics-only refill eligibility
 
 * Changed `evidence_cand` from robust-public-TE-only to the union of robust TE,

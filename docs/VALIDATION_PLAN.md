@@ -114,3 +114,38 @@ CHO mapping summary contains all selected library rows.
 suspected non-CHO/hallucinated sequences are explicitly listed.
 Excel, PPT, length/GC tables, charts, and v1.3 comparison are generated.
 ```
+
+## v1.4 PR3 Logical Scoring Selection
+
+Run selection on the workstation:
+
+```bash
+python 01_pipeline/scripts/10_select_2000_cluster_diverse_library.py \
+  --n 2000 \
+  --allow-cluster-fill 2 \
+  --max-per-gene 3 \
+  --classifier-validation 06_modeling/tables/cluster_aware_classification_benchmark.csv \
+  --pr2-library 07_library_design/tables/v1.4_pr2_selected_2000_library.csv
+```
+
+Required checks:
+
+```text
+selected_n == 2000
+shortage_n == 0
+J_fill_selected_n == 0
+protein_floor_pass == True when at least 300 protein-supported candidates exist
+classifier_floor_pass == True when at least 800 classifier-supported candidates exist
+diversity_floor_pass == True
+max_per_gene <= 3
+max_per_seq_cluster <= 2
+```
+
+PR3 outputs:
+
+```text
+07_library_design/tables/v1.4_selection_policy_qc.csv
+07_library_design/tables/v1.4_selection_length_gc_bins.csv
+07_library_design/tables/evidence_refill_audit.csv
+07_library_design/tables/v1.4_pr3_vs_pr2_comparison_ready.csv
+```
