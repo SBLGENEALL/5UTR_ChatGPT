@@ -106,6 +106,10 @@ max_per_gene <= 3.
 max_per_seq_cluster <= 2.
 v1.4_selection_policy_qc.csv reports A/B/C/D/E/F/G/H/K counts and
 protein-, classifier-, and multiomics-supported selected totals.
+evidence_candidate_n includes the union of robust TE, multiomics, protein,
+and classifier/model support without requiring robust_public_te_rank.
+multiomics_without_robust_candidate_n and
+multiomics_without_robust_selected_count are reported.
 CHO mapping summary contains all selected library rows.
 suspected non-CHO/hallucinated sequences are explicitly listed.
 Excel, PPT, length/GC tables, charts, and v1.3 comparison are generated.

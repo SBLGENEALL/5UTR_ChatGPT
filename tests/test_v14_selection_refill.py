@@ -49,10 +49,10 @@ class V14SelectionRefillTests(unittest.TestCase):
                             "utr5_sequence_tss_corrected": encoded_sequence(i),
                             "seq_cluster_id": f"cluster_{i // 2}",
                             "robust_public_te_rank": 0.5 + i / 2000 if i < 800 else "",
-                            "heavy_ensemble_score": 0.5 + i / 2400 if i < 1200 else "",
-                            "protein_abundance_rank": 0.7 if 800 <= i < 1500 else "",
-                            "protein_residual_rank": 0.7 if 900 <= i < 1550 else "",
-                            "multi_omics_utr_rank": 0.7 if i < 650 else "",
+                            "heavy_ensemble_score": 0.5 + i / 2400 if i < 800 else "",
+                            "protein_abundance_rank": 0.7 if 1400 <= i < 1900 else "",
+                            "protein_residual_rank": 0.7 if 1500 <= i < 1950 else "",
+                            "multi_omics_utr_rank": 0.7 if i < 1400 else "",
                             "is_expressed_public": True,
                         }
                     )
@@ -84,8 +84,22 @@ class V14SelectionRefillTests(unittest.TestCase):
             self.assertEqual(int(qc["shortage_n"]), 0)
             self.assertEqual(int(qc["J_fill_selected_n"]), 0)
             self.assertGreater(int(qc["K_count"]), 0)
+            self.assertGreater(int(qc["multiomics_without_robust_candidate_n"]), 0)
+            self.assertGreater(int(qc["multiomics_without_robust_selected_count"]), 0)
             self.assertLessEqual(int(qc["max_per_gene"]), 3)
             self.assertLessEqual(int(qc["max_per_seq_cluster"]), 2)
+
+            selected_path = workdir / (
+                "07_library_design/tables/"
+                "selected_2000_50_100bp_cluster_diverse_evidence_balanced_library.csv"
+            )
+            selected = pd.read_csv(selected_path)
+            k1_multiomics_without_robust = selected[
+                selected["library_group"].eq("K1_ABE_evidence_relaxed") &
+                selected["multi_omics_utr_rank"].notna() &
+                selected["robust_public_te_rank"].isna()
+            ]
+            self.assertGreater(len(k1_multiomics_without_robust), 0)
 
 
 if __name__ == "__main__":

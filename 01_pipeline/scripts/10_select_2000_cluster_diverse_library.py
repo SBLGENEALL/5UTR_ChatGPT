@@ -233,10 +233,7 @@ def write_uaug_audit(lib):
 def dry_run_select_uaug0(base_cand, args, quotas, production_lib):
     uaug0 = pd.to_numeric(base_cand["uaug_count"], errors="coerce").fillna(999).eq(0)
     base0 = base_cand[uaug0].copy().reset_index(drop=True)
-    evidence0 = base0[
-        optional_bool_gate(base0, "is_expressed_public", default=True) &
-        pd.to_numeric(base0["robust_public_te_rank"], errors="coerce").notna()
-    ].copy()
+    evidence0 = base0[optional_bool_gate(base0, "has_any_evidence_support", default=False)].copy()
 
     selected = []
     used_seq = set()
@@ -269,14 +266,14 @@ def dry_run_select_uaug0(base_cand, args, quotas, production_lib):
         taken_by_group[group] += len(rows)
         return len(rows)
 
-    take(evidence0, quotas["A_publicTE_high_confidence"], "A_publicTE_high_confidence", ["robust_public_te_rank", "day_consensus_TE_rank" if "day_consensus_TE_rank" in evidence0.columns else "cluster_diverse_evidence_score"], source="uaug0_evidence_cand")
-    take(evidence0, quotas["B_TE_model_classifier_supported"], "B_TE_model_classifier_supported", ["model_support_score", "robust_public_te_rank"], source="uaug0_evidence_cand")
+    take(evidence0[optional_bool_gate(evidence0, "has_robust_public_te_support", default=False)], quotas["A_publicTE_high_confidence"], "A_publicTE_high_confidence", ["robust_public_te_rank", "day_consensus_TE_rank" if "day_consensus_TE_rank" in evidence0.columns else "cluster_diverse_evidence_score"], source="uaug0_robust_public_te")
+    take(evidence0[optional_bool_gate(evidence0, "has_classifier_support", default=False)], quotas["B_TE_model_classifier_supported"], "B_TE_model_classifier_supported", ["model_support_score", "robust_public_te_rank"], source="uaug0_classifier_supported")
     if "protein_abundance_rank" in evidence0.columns:
         take(evidence0[evidence0["protein_abundance_rank"].notna()], quotas["C_protein_abundance_supported"], "C_protein_abundance_supported", ["protein_abundance_rank", "cluster_diverse_evidence_score"], source="uaug0_evidence_cand")
     if "protein_residual_rank" in evidence0.columns:
         take(evidence0[evidence0["protein_residual_rank"].notna()], quotas["D_protein_residual_supported"], "D_protein_residual_supported", ["protein_residual_rank", "cluster_diverse_evidence_score"], source="uaug0_evidence_cand")
     if "multi_omics_utr_rank" in evidence0.columns:
-        take(evidence0, quotas["E_multiomics_consensus_high"], "E_multiomics_consensus_high", ["multi_omics_utr_rank", "cluster_diverse_evidence_score"], source="uaug0_evidence_cand")
+        take(evidence0[optional_bool_gate(evidence0, "has_multiomics_support", default=False)], quotas["E_multiomics_consensus_high"], "E_multiomics_consensus_high", ["multi_omics_utr_rank", "cluster_diverse_evidence_score"], source="uaug0_multiomics_supported")
 
     robust_rank = pd.to_numeric(base0["robust_public_te_rank"], errors="coerce")
     exploratory = base0[robust_rank.between(0.35, 0.90) | robust_rank.isna()].copy()
@@ -325,7 +322,7 @@ def dry_run_select_uaug0(base_cand, args, quotas, production_lib):
                 cid = str(row.get("seq_cluster_id", row[SEQ]))
                 if cluster_counts[cid] < args.allow_cluster_fill:
                     row = row.copy()
-                    row["library_group"] = "A_publicTE_high_confidence"
+                    row["library_group"] = "K_dry_run_any_evidence"
                     row["selection_source"] = source
                     row["selection_phase"] = "evidence_refill"
                     rows.append(row)
@@ -333,7 +330,7 @@ def dry_run_select_uaug0(base_cand, args, quotas, production_lib):
                     cluster_counts[cid] += 1
             if rows:
                 lib = pd.concat([lib, pd.DataFrame(rows)], ignore_index=True, sort=False)
-                taken_by_group["A_publicTE_high_confidence"] += len(rows)
+                taken_by_group["K_dry_run_any_evidence"] += len(rows)
 
         fill_from(evidence0, "uaug0_fill_evidence_cand")
 
@@ -499,10 +496,47 @@ def main():
         base_cand["robust_public_te_rank"] = np.nan
     base_cand["cluster_diverse_evidence_score"] = evidence_score(base_cand)
     base_expression_gate = optional_bool_gate(base_cand, "is_expressed_public", default=True)
-    evidence_cand = base_cand[
-        base_expression_gate &
-        pd.to_numeric(base_cand["robust_public_te_rank"], errors="coerce").notna()
-    ].copy()
+
+    model_cols = [
+        c for c in [
+            "heavy_ensemble_score",
+            "automl_ensemble_score",
+            "proteomics_enriched_score",
+            "model_pred_rank_40_200train",
+        ]
+        if c in base_cand.columns
+    ]
+    if model_cols:
+        numeric_model = base_cand[model_cols].apply(pd.to_numeric, errors="coerce")
+        base_cand["model_support_score"] = numeric_model.mean(axis=1)
+        base_cand["has_classifier_support"] = numeric_model.notna().any(axis=1)
+    else:
+        base_cand["model_support_score"] = base_cand["cluster_diverse_evidence_score"]
+        base_cand["has_classifier_support"] = False
+
+    protein_cols = [c for c in ["protein_abundance_rank", "protein_residual_rank"] if c in base_cand.columns]
+    protein_numeric = (
+        base_cand[protein_cols].apply(pd.to_numeric, errors="coerce").notna().any(axis=1)
+        if protein_cols else pd.Series(False, index=base_cand.index)
+    )
+    base_cand["has_protein_support"] = (
+        optional_bool_gate(base_cand, "has_proteomics_label", default=False) | protein_numeric
+    )
+    base_cand["has_multiomics_support"] = (
+        pd.to_numeric(base_cand["multi_omics_utr_rank"], errors="coerce").notna()
+        if "multi_omics_utr_rank" in base_cand.columns
+        else False
+    )
+    base_cand["has_robust_public_te_support"] = pd.to_numeric(
+        base_cand["robust_public_te_rank"], errors="coerce"
+    ).notna()
+    base_cand["has_any_evidence_support"] = (
+        base_cand["has_robust_public_te_support"] |
+        base_cand["has_multiomics_support"] |
+        base_cand["has_protein_support"] |
+        base_cand["has_classifier_support"]
+    )
+    evidence_cand = base_cand[base_cand["has_any_evidence_support"]].copy()
 
     print(f"[BASE CANDIDATES] {len(base_cand):,}")
     print(f"[EVIDENCE CANDIDATES] {len(evidence_cand):,}")
@@ -573,32 +607,13 @@ def main():
         "H_low_signal_negative_controls": 50,
     }
 
-    model_cols = [c for c in ["heavy_ensemble_score", "automl_ensemble_score", "proteomics_enriched_score", "model_pred_rank_40_200train"] if c in base_cand.columns]
-    if model_cols:
-        numeric_model = base_cand[model_cols].apply(pd.to_numeric, errors="coerce")
-        base_cand["model_support_score"] = numeric_model.mean(axis=1)
-        base_cand["has_classifier_support"] = numeric_model.notna().any(axis=1)
-    else:
-        base_cand["model_support_score"] = base_cand["cluster_diverse_evidence_score"]
-        base_cand["has_classifier_support"] = False
-    protein_cols = [c for c in ["protein_abundance_rank", "protein_residual_rank"] if c in base_cand.columns]
-    protein_numeric = (
-        base_cand[protein_cols].apply(pd.to_numeric, errors="coerce").notna().any(axis=1)
-        if protein_cols else pd.Series(False, index=base_cand.index)
+    take(
+        evidence_cand[evidence_cand["has_robust_public_te_support"]],
+        quotas["A_publicTE_high_confidence"],
+        "A_publicTE_high_confidence",
+        ["robust_public_te_rank", "day_consensus_TE_rank" if "day_consensus_TE_rank" in evidence_cand.columns else "cluster_diverse_evidence_score"],
+        source="evidence_cand_robust_public_te",
     )
-    base_cand["has_protein_support"] = (
-        optional_bool_gate(base_cand, "has_proteomics_label", default=False) | protein_numeric
-    )
-    base_cand["has_multiomics_support"] = (
-        pd.to_numeric(base_cand["multi_omics_utr_rank"], errors="coerce").notna()
-        if "multi_omics_utr_rank" in base_cand.columns
-        else False
-    )
-    evidence_cand = base_cand[
-        base_expression_gate &
-        pd.to_numeric(base_cand["robust_public_te_rank"], errors="coerce").notna()
-    ].copy()
-    take(evidence_cand, quotas["A_publicTE_high_confidence"], "A_publicTE_high_confidence", ["robust_public_te_rank", "day_consensus_TE_rank" if "day_consensus_TE_rank" in evidence_cand.columns else "cluster_diverse_evidence_score"], source="evidence_cand")
     take(
         evidence_cand[evidence_cand["has_classifier_support"]],
         quotas["B_TE_model_classifier_supported"],
@@ -738,8 +753,11 @@ def main():
         refill_specs = [
             (
                 "K1_ABE_evidence_relaxed",
-                evidence_cand,
-                "K1_unselected_ABE_evidence",
+                evidence_cand[
+                    evidence_cand["has_robust_public_te_support"] |
+                    evidence_cand["has_multiomics_support"]
+                ],
+                "K1_unselected_robust_or_multiomics",
                 ["robust_public_te_rank", "multi_omics_utr_rank", "cluster_diverse_evidence_score"],
             ),
             (
@@ -823,15 +841,27 @@ def main():
     protein_selected = int(optional_bool_gate(lib, "has_protein_support", default=False).sum())
     classifier_selected = int(optional_bool_gate(lib, "has_classifier_support", default=False).sum())
     multiomics_selected = int(optional_bool_gate(lib, "has_multiomics_support", default=False).sum())
+    robust_selected_mask = optional_bool_gate(lib, "has_robust_public_te_support", default=False)
+    multiomics_selected_mask = optional_bool_gate(lib, "has_multiomics_support", default=False)
+    multiomics_without_robust_selected = int(
+        (multiomics_selected_mask & ~robust_selected_mask).sum()
+    )
+    multiomics_without_robust_candidate_mask = (
+        base_cand["has_multiomics_support"] &
+        ~base_cand["has_robust_public_te_support"]
+    )
     selection_qc = {
         "selected_n": len(lib),
         "requested_n": args.n,
         "shortage_n": max(0, args.n - len(lib)),
         "J_fill_selected_n": j_fill_selected_n,
+        "evidence_candidate_n": len(evidence_cand),
+        "multiomics_without_robust_candidate_n": int(multiomics_without_robust_candidate_mask.sum()),
         **{f"{prefix}_count": prefix_counts[prefix] for prefix in "ABCDEFGHK"},
         "total_protein_supported_selected_count": protein_selected,
         "total_classifier_supported_selected_count": classifier_selected,
         "total_multiomics_supported_selected_count": multiomics_selected,
+        "multiomics_without_robust_selected_count": multiomics_without_robust_selected,
         "max_per_gene": final_max_gene,
         "gene_cap": args.max_per_gene,
         "max_per_seq_cluster": final_max_cluster,
@@ -848,7 +878,8 @@ def main():
         "selection_phase",
         "robust_public_te_rank", "day_consensus_TE_rank", "protein_abundance_rank", "protein_residual_rank", "multi_omics_utr_rank",
         "cluster_diverse_evidence_score", "model_support_score", "has_proteomics_label",
-        "has_protein_support", "has_classifier_support", "has_multiomics_support"
+        "has_protein_support", "has_classifier_support", "has_multiomics_support",
+        "has_robust_public_te_support", "has_any_evidence_support"
     ] if c in lib.columns]
     lib = lib[front + [c for c in lib.columns if c not in front]]
     lib.to_csv(OUT_CSV, index=False)
@@ -863,7 +894,7 @@ def main():
         "=" * 100,
         f"input: {path}",
         f"candidate_pool_after_QC: {len(base_cand)}",
-        f"evidence_candidate_pool_after_expression_TE_QC: {len(evidence_cand)}",
+        f"evidence_candidate_pool_after_any_evidence_union_QC: {len(evidence_cand)}",
         f"requested_n: {args.n}",
         f"selected_n: {len(lib)}",
         f"shortage_n: {selection_qc['shortage_n']}",
@@ -886,6 +917,8 @@ def main():
         f"total_protein_supported_selected_count: {selection_qc['total_protein_supported_selected_count']}",
         f"total_classifier_supported_selected_count: {selection_qc['total_classifier_supported_selected_count']}",
         f"total_multiomics_supported_selected_count: {selection_qc['total_multiomics_supported_selected_count']}",
+        f"multiomics_without_robust_candidate_n: {selection_qc['multiomics_without_robust_candidate_n']}",
+        f"multiomics_without_robust_selected_count: {selection_qc['multiomics_without_robust_selected_count']}",
         "",
         "[Selection source counts]",
         lib["selection_source"].value_counts(dropna=False).to_string() if "selection_source" in lib.columns else "NA",

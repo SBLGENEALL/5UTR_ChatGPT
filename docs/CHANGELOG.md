@@ -1,5 +1,13 @@
 # CHANGELOG
 
+## 2026-06-12 - v1.4 PR2 multiomics-only refill eligibility
+
+* Changed `evidence_cand` from robust-public-TE-only to the union of robust TE,
+  multiomics, protein abundance/residual, and classifier/model support.
+* Removed robust-public-TE as a requirement for K refill eligibility.
+* Added explicit QC counts for multiomics-only candidates and selections.
+* Preserved uAUG0, 50-100 nt, gene cap 3, sequence-cluster cap 2, and J-fill 0.
+
 ## 2026-06-12 - v1.4 PR1 non-J refill correction
 
 * Rebalanced A-H primary quotas and reduced H negative controls from 100 to 50.
